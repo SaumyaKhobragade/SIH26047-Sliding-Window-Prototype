@@ -4,11 +4,13 @@ export const patients = {
     name: 'Rahul Sharma',
     age: 42,
     gender: 'Male',
+    abhaId: 'Demo-ABHA-001',
     dateOfBirth: '1981-08-15',
     phone: '+91 98765 43210',
     email: 'rahul.sharma@example.com',
     address: '42/B Maple Street, New Delhi',
     clinicalMode: 'general',
+    chiefComplaint: 'Chest pain',
   },
   mockPatients: [
     {
