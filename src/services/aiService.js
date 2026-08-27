@@ -4,12 +4,14 @@
  * Supports both mock and live modes
  */
 
-const AI_MODE = process.env.REACT_APP_AI_MODE || 'mock'
+const getEnv = (key) => (typeof process !== 'undefined' && process.env ? process.env[key] : undefined)
+
+const AI_MODE = getEnv('REACT_APP_AI_MODE') || 'mock'
 
 export class AIService {
   constructor(mode = 'mock') {
     this.mode = mode
-    this.apiKey = process.env.REACT_APP_OPENAI_API_KEY || null
+    this.apiKey = getEnv('REACT_APP_OPENAI_API_KEY') || null
   }
 
   /**
