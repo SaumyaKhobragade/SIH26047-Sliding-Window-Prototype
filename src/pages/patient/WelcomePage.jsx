@@ -10,9 +10,8 @@ export default function WelcomePage() {
 
   const languages = [
     { code: 'en', name: 'English' },
-    { code: 'hi', name: 'हिंदी' },
-    { code: 'ta', name: 'தமிழ்' },
-    { code: 'te', name: 'తెలుగు' },
+    { code: 'hi', name: 'हिंदी (Hindi)' },
+    { code: 'mr', name: 'मराठी (Marathi)' },
   ]
 
   const handleStart = () => {
