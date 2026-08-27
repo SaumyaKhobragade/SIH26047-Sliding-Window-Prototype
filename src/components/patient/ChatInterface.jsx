@@ -216,10 +216,10 @@ export default function ChatInterface() {
         {isComplete && (
           <div className="flex justify-center mt-6">
             <button
-              onClick={() => navigate('/patient/summary')}
-              className="px-8 py-3 bg-medical-600 text-white rounded-lg font-bold hover:bg-medical-700 transition-colors"
+              onClick={() => navigate('/patient/documents')}
+              className="px-8 py-3 bg-medical-600 text-white rounded-lg font-bold hover:bg-medical-700 transition-colors shadow-md flex items-center gap-2"
             >
-              Review Summary
+              Continue to Medical Documents →
             </button>
           </div>
         )}

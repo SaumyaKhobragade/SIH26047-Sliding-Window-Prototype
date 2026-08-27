@@ -38,6 +38,7 @@ export function createEmptyHistory() {
     reviewOfSystems: {},
     ayushAssessment: {},
     redFlags: [],
+    documents: [],
     interviewProgress: {
       currentSection: 'chief_complaint',
       completedSections: [],
