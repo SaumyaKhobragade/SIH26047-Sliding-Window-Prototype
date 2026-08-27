@@ -7,6 +7,7 @@ import RedFlagAlert from './RedFlagAlert'
 import VoiceButton from './VoiceButton'
 import VoiceTranscript from './VoiceTranscript'
 import VoiceSettings from './VoiceSettings'
+import VoiceStatus from './VoiceStatus'
 import { getConversationEngine } from '../../services/conversationEngine'
 import { getAIService } from '../../services/aiService'
 import { getRedFlagDetector } from '../../services/redFlagService'
@@ -319,6 +320,13 @@ export default function ChatInterface() {
       {/* Input Area */}
       {!isComplete && (
         <div className="border-t bg-white p-4 space-y-3 shadow-lg">
+          {/* Voice Engine & Listening Status */}
+          <VoiceStatus
+            isSupported={speechService.isRecognitionSupported()}
+            isListening={isListening}
+            language={currentLanguage}
+          />
+
           {/* Recognized Voice Transcript Review (Before Final Submission) */}
           {recognizedTranscript && (
             <VoiceTranscript
