@@ -1,7 +1,7 @@
 import { useNavigate } from 'react-router-dom'
 import { Heart, Globe } from 'lucide-react'
-import Button from '../components/Button'
-import PageContainer from '../components/PageContainer'
+import Button from '../../components/Button'
+import PageContainer from '../../components/PageContainer'
 
 export default function WelcomePage() {
   const navigate = useNavigate()

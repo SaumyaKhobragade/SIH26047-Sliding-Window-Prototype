@@ -1,14 +1,14 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { AlertCircle, FileText, Clock, CheckCircle, User, Phone } from 'lucide-react'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import Card from '../components/Card'
-import ClinicalSummarySection from '../components/ClinicalSummarySection'
-import StatusBadge from '../components/StatusBadge'
-import { patients } from '../data/patients'
-import { summaryData } from '../data/summary'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import Card from '../../components/Card'
+import ClinicalSummarySection from '../../components/ClinicalSummarySection'
+import StatusBadge from '../../components/StatusBadge'
+import { patients } from '../../data/patients'
+import { summaryData } from '../../data/summary'
 
 export default function DoctorDashboardPage() {
   const navigate = useNavigate()

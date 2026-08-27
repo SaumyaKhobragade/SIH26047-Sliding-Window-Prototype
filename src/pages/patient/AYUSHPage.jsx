@@ -1,11 +1,11 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import Card from '../components/Card'
-import ProgressIndicator from '../components/ProgressIndicator'
-import { ayushData } from '../data/ayush'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import Card from '../../components/Card'
+import ProgressIndicator from '../../components/ProgressIndicator'
+import { ayushData } from '../../data/ayush'
 
 export default function AYUSHPage() {
   const navigate = useNavigate()

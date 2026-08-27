@@ -1,13 +1,13 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Upload, FileText } from 'lucide-react'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import Card from '../components/Card'
-import DocumentCard from '../components/DocumentCard'
-import ProgressIndicator from '../components/ProgressIndicator'
-import { documentsData } from '../data/documents'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import Card from '../../components/Card'
+import DocumentCard from '../../components/DocumentCard'
+import ProgressIndicator from '../../components/ProgressIndicator'
+import { documentsData } from '../../data/documents'
 
 export default function DocumentsPage() {
   const navigate = useNavigate()

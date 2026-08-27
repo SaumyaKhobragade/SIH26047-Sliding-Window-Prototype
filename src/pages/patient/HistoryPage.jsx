@@ -1,13 +1,13 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Mic, Send } from 'lucide-react'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import Card from '../components/Card'
-import VoiceButton from '../components/VoiceButton'
-import ProgressIndicator from '../components/ProgressIndicator'
-import { conversationData } from '../data/conversations'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import Card from '../../components/Card'
+import VoiceButton from '../../components/VoiceButton'
+import ProgressIndicator from '../../components/ProgressIndicator'
+import { conversationData } from '../../data/conversations'
 
 export default function HistoryPage() {
   const navigate = useNavigate()

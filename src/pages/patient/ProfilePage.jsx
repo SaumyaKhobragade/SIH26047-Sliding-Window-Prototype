@@ -1,11 +1,11 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import PatientInfoCard from '../components/PatientInfoCard'
-import Card from '../components/Card'
-import { patients } from '../data/patients'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import PatientInfoCard from '../../components/PatientInfoCard'
+import Card from '../../components/Card'
+import { patients } from '../../data/patients'
 
 export default function ProfilePage() {
   const navigate = useNavigate()

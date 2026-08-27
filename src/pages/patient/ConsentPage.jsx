@@ -1,10 +1,10 @@
 import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Shield, Lock } from 'lucide-react'
-import Button from '../components/Button'
-import Header from '../components/Header'
-import PageContainer from '../components/PageContainer'
-import Card from '../components/Card'
+import Button from '../../components/Button'
+import Header from '../../components/Header'
+import PageContainer from '../../components/PageContainer'
+import Card from '../../components/Card'
 
 export default function ConsentPage() {
   const navigate = useNavigate()
