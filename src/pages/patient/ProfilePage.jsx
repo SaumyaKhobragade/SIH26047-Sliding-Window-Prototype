@@ -6,13 +6,24 @@ import PageContainer from '../../components/PageContainer'
 import PatientInfoCard from '../../components/PatientInfoCard'
 import Card from '../../components/Card'
 import { patients } from '../../data/patients'
+import { usePatient } from '../../context/PatientContext'
 
 export default function ProfilePage() {
   const navigate = useNavigate()
+  const { updatePatientHistory } = usePatient()
   const [clinicalMode, setClinicalMode] = React.useState('general')
   const patient = patients.demoPatient
 
   const handleContinue = () => {
+    // Update patient context with patient info and chief complaint
+    updatePatientHistory('patientInfo', {
+      name: patient.name,
+      age: patient.age,
+      gender: patient.gender,
+      abhaId: patient.abhaId,
+    })
+    updatePatientHistory('chiefComplaint', patient.chiefComplaint || '')
+    
     localStorage.setItem('selectedClinicalMode', clinicalMode)
     navigate('/patient/history')
   }

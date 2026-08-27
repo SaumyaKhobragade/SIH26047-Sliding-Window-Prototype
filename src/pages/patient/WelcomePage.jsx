@@ -1,3 +1,4 @@
+import React from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Heart, Globe } from 'lucide-react'
 import Button from '../../components/Button'
@@ -79,5 +80,3 @@ export default function WelcomePage() {
     </PageContainer>
   )
 }
-
-import React from 'react'
