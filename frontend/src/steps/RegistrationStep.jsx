@@ -27,6 +27,8 @@ export default function RegistrationStep({ onComplete }) {
   const canvasRef = useRef(null)
   const streamRef = useRef(null)
   const recognitionRef = useRef(null)
+  const timeoutRef = useRef(null)
+  const captureStartedRef = useRef(false)
 
   const step = flowState === 'new_reg' ? REGISTRATION_STEPS[currentStep] : null
 
@@ -34,6 +36,7 @@ export default function RegistrationStep({ onComplete }) {
   useEffect(() => {
     startCamera()
     return () => {
+      if (timeoutRef.current) clearTimeout(timeoutRef.current)
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
       if (recognitionRef.current) recognitionRef.current.abort()
     }
@@ -51,7 +54,7 @@ export default function RegistrationStep({ onComplete }) {
       }
       setFaceState('capturing')
       // Auto-capture after 2.5s
-      setTimeout(() => captureAndIdentify(), 2500)
+      timeoutRef.current = setTimeout(() => captureAndIdentify(), 2500)
     } catch {
       setFaceState('captured')
       speakPrompt('Camera not available. Chaliye registration shuru karte hain.')
@@ -60,6 +63,9 @@ export default function RegistrationStep({ onComplete }) {
   }
 
   const captureAndIdentify = async () => {
+    if (captureStartedRef.current) return
+    captureStartedRef.current = true
+
     // Capture photo
     if (videoRef.current && canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d')
