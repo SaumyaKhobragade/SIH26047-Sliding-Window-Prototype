@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Aarogya — Voice-led clinical intake</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=DM+Serif+Display:ital@0;1&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="style.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="Aarogya home">
+          <span class="brand-mark"><i></i><i></i><i></i></span>
+          <span>Aarogya</span>
+        </a>
+        <div class="encounter">
+          <span class="online-dot"></span>
+          <span>Private consultation</span>
+          <b>•</b>
+          <span id="clock">10:42 AM</span>
+        </div>
+        <button class="help-button" aria-label="Get help">?</button>
+      </header>
+
+      <main class="main-content">
+        <aside class="journey" aria-label="Patient intake steps">
+          <div class="journey-intro"><span class="eyebrow">PATIENT INTAKE</span><h2>Your care,<br />one calm step<br />at a time.</h2></div>
+          <div class="step-list">
+            <button class="journey-step active" data-go="1"><span>01</span><em>Identify</em></button>
+            <button class="journey-step" data-go="2"><span>02</span><em>Confirm</em></button>
+            <button class="journey-step" data-go="3"><span>03</span><em>Register</em></button>
+            <button class="journey-step" data-go="4"><span>04</span><em>Listen</em></button>
+            <button class="journey-step" data-go="5"><span>05</span><em>Records</em></button>
+            <button class="journey-step" data-go="6"><span>06</span><em>Summary</em></button>
+          </div>
+          <div class="journey-footer"><span class="lock">⌁</span> Your information stays secure</div>
+        </aside>
+
+        <section class="screen-stage">
+          <!-- Screen 1 -->
+          <article class="screen active" data-screen="1">
+            <div class="screen-heading welcome-heading">
+              <span class="eyebrow">NAMASTE · WELCOME</span>
+              <h1>Let’s begin with<br /><i>your presence.</i></h1>
+              <p>Look at the camera to identify yourself.</p>
+            </div>
+            <div class="scan-layout">
+              <div class="camera-card">
+                <div class="camera-top"><span><span class="live-dot"></span> LIVE CAMERA</span><span>HD · 1080p</span></div>
+                <video id="cameraFeed" autoplay muted playsinline></video>
+                <div class="camera-fallback" id="cameraFallback">
+                  <div class="portrait-shape"><div class="hair"></div><div class="face"><i></i><i></i><b></b></div><div class="neck"></div><div class="shoulders"></div></div>
+                </div>
+                <div class="scan-frame"><span></span><span></span><span></span><span></span></div>
+                <div class="face-guide"><span class="guide-ring"></span><small>POSITION FACE IN FRAME</small></div>
+                <div class="camera-bottom"><span>Face recognition is encrypted</span><span class="camera-battery">▰</span></div>
+              </div>
+              <div class="scan-actions">
+                <p class="scan-note"><span>✦</span> We’ll only use this to find your care records.</p>
+                <button class="capture-button" id="captureBtn"><span class="capture-icon"></span> Capture <kbd>↵</kbd></button>
+                <div class="language-box"><span>YOUR LANGUAGE</span><div class="language-toggle" role="group" aria-label="Select language"><button>हिंदी</button><button class="selected">English</button><button>Hinglish</button></div></div>
+              </div>
+            </div>
+          </article>
+
+          <!-- Screen 2 -->
+          <article class="screen" data-screen="2">
+            <div class="screen-heading compact-heading"><span class="eyebrow">IDENTITY CONFIRMED</span><h1>Is this <i>you?</i></h1><p>We found a possible match in the Aarogya care network.</p></div>
+            <div class="match-card">
+              <div class="match-photo"><img id="capturedImage" alt="Captured patient" /><div class="photo-tag"><span></span> FACE MATCHED</div></div>
+              <div class="patient-profile">
+                <div class="confidence"><span>98.7%</span><small>match confidence</small><div class="confidence-bar"><i></i></div></div>
+                <span class="eyebrow">PATIENT RECORD</span>
+                <h2>Priya Sharma</h2>
+                <div class="profile-meta"><div><small>PATIENT ID</small><b>AR-28491</b></div><div><small>PAST VISITS</small><b>06 visits</b></div><div><small>LAST VISIT</small><b>12 Jun 2026</b></div></div>
+                <div class="profile-actions"><button class="primary-action" data-next="4">Sahi hai <span>—</span> Start Interview</button><button class="text-action" data-next="3">Change details</button></div>
+              </div>
+            </div>
+            <div class="speak-hint"><button class="mini-mic" data-listen aria-label="Speak">⌁</button><span><b>Prefer to speak?</b> Tap the mic and say “Yes, this is me”.</span></div>
+          </article>
+
+          <!-- Screen 3 -->
+          <article class="screen" data-screen="3">
+            <div class="screen-heading split-heading"><div><span class="eyebrow">NEW PATIENT</span><h1>Let’s get to <i>know you.</i></h1><p>Answer in the language that feels natural.</p></div><div class="step-counter"><b id="registerStep">Step 1</b><span>of 6</span><div><i id="registerProgress" style="width:16.67%"></i></div></div></div>
+            <div class="chat-shell register-chat">
+              <div class="chat-date">TODAY · FIRST VISIT</div>
+              <div class="message ai-message"><span class="avatar ai-avatar">A</span><div><p>Namaste! I’m Aarogya, your care assistant.</p><p class="question" id="registrationQuestion">May I know your full name?</p><time>10:42 AM</time></div></div>
+              <div id="registrationMessages"></div>
+              <div class="suggestions" id="suggestionChips"><button>Priya Sharma</button><button>Say it aloud</button></div>
+            </div>
+            <div class="voice-dock"><button class="large-mic" data-listen aria-label="Speak your answer"><span>⌁</span></button><div class="input-wrap"><input id="registrationInput" type="text" placeholder="Type your answer here…" /><button id="sendRegistration" aria-label="Send answer">↑</button></div><small>Tap to speak</small></div>
+          </article>
+
+          <!-- Screen 4 -->
+          <article class="screen clinical-screen" data-screen="4">
+            <div class="screen-heading split-heading clinical-heading"><div><span class="eyebrow">CLINICAL CONVERSATION</span><h1>Tell me what’s<br /><i>troubling you.</i></h1></div><div class="socrates-progress"><div><b>SOCRATES</b><span id="socratesPercent">38%</span></div><div class="progress-track"><i id="socratesBar"></i></div><small>3 of 8 clinical dimensions complete</small></div></div>
+            <div class="clinical-grid">
+              <div class="interview-chat chat-shell">
+                <div class="framework-row"><span class="done">S</span><span class="done">O</span><span class="done">C</span><span>R</span><span>A</span><span>T</span><span>E</span><span>S</span><em>Site · Onset · Character · Radiation...</em></div>
+                <div class="message patient-message"><div><p>It’s a sharp pain on the right side of my chest.</p><time>10:46 AM</time></div></div>
+                <div class="message ai-message"><span class="avatar ai-avatar">A</span><div><p>Thank you. Does the pain travel anywhere — perhaps to your arm, jaw, back, or shoulder?</p><time>10:46 AM</time></div></div>
+                <div class="message patient-message pending-response" id="clinicalAnswer"><div><span class="typing-dot"></span><span class="typing-dot"></span><span class="typing-dot"></span></div></div>
+              </div>
+              <aside class="clinical-side">
+                <div class="red-flag"><div class="flag-icon">!</div><div><b>Red Flag Alert</b><p>Chest pain mentioned. Ask about breathlessness, sweating &amp; radiation.</p></div><button aria-label="Dismiss alert">×</button></div>
+                <div class="transcript"><div class="transcript-title"><span><i class="listening-dot"></i> LIVE TRANSCRIPT</span><small>Listening</small></div><p id="liveTranscript">“It’s been there since this morning…”</p><div class="sound-bars"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div>
+                <div class="clinical-notes"><span>AI NOTE</span><p>Symptom pattern is being structured for the clinician.</p></div>
+              </aside>
+            </div>
+            <div class="voice-dock clinical-dock"><button class="large-mic is-listening" data-listen aria-label="Stop listening"><span>⌁</span></button><div class="input-wrap"><input id="clinicalInput" type="text" placeholder="Speak or type your response…" /><button id="sendClinical" aria-label="Send answer">↑</button></div><small>Listening… tap mic to pause</small></div>
+          </article>
+
+          <!-- Screen 5 -->
+          <article class="screen" data-screen="5">
+            <div class="screen-heading compact-heading"><span class="eyebrow">YOUR MEDICAL RECORDS</span><h1>Bring your history<br /><i>with you.</i></h1><p>Upload an old prescription and we’ll make it easy to review.</p></div>
+            <div class="records-grid">
+              <div class="upload-panel" id="uploadPanel"><input type="file" id="prescriptionFile" accept="image/*" /><div class="upload-art"><div class="paper-icon"><span></span><span></span><span></span><i>+</i></div></div><h3>Prescription, report<br />or medicine label</h3><p>Drag it here, or choose a photo</p><button class="upload-button" id="chooseFile">Choose file <span>↗</span></button><small>JPG, PNG or HEIC · up to 10 MB</small></div>
+              <div class="extract-panel"><div class="extract-header"><div><span class="eyebrow">AI READING</span><h2>What we found</h2></div><span class="reading-status"><i></i> Ready to review</span></div><div class="preview-row"><div class="document-preview" id="documentPreview"><div class="rx">℞</div><span>Dr. A. Kapoor</span><i></i><i></i><i></i></div><div class="preview-copy"><b id="uploadStatus">Prescription image</b><span>06 Jun 2026</span><small>AI extracted 3 medicines</small></div></div><div class="med-list"><div><span>MEDICINE</span><span>DOSE</span><span>SCHEDULE</span></div><article><b>Paracetamol 650</b><span>650 mg</span><em>After meals · 3 days</em></article><article><b>Pantoprazole</b><span>40 mg</span><em>Before breakfast · 5 days</em></article><article><b>Vitamin D3</b><span>60k IU</span><em>Once weekly · 4 weeks</em></article></div><button class="primary-action confirm-button" data-next="6">Confirm extracted medicines <span>→</span></button></div>
+            </div>
+          </article>
+
+          <!-- Screen 6 -->
+          <article class="screen" data-screen="6">
+            <div class="completion-head"><div><span class="eyebrow">READY FOR YOUR DOCTOR</span><h1>Your story, <i>clearly told.</i></h1></div><div class="complete-mark"><span>✓</span><small>INTAKE COMPLETE</small></div></div>
+            <div class="summary-layout">
+              <section class="summary-card"><div class="summary-top"><div><span class="eyebrow">CLINICAL INTAKE SUMMARY</span><h2>Priya Sharma</h2><p>Generated 29 Aug 2026 · 10:51 AM</p></div><span class="secure-badge">⌁ Secure</span></div><div class="summary-person"><div><span>AGE</span><b>34 years</b></div><div><span>GENDER</span><b>Female</b></div><div><span>CHIEF COMPLAINT</span><b>Right-sided chest pain</b></div></div><div class="summary-section"><h3>SOCRATES findings</h3><p>Sharp, right-sided chest pain since this morning. No reported radiation. Patient describes intermittent episodes, aggravated by deep breathing.</p></div><div class="summary-section warning-summary"><h3><span>!</span> Red flags to review</h3><p>Chest pain reported. Clinician to assess breathlessness, diaphoresis and cardiac risk factors.</p></div><div class="summary-section meds-summary"><h3>Current / recently prescribed medications</h3><div><span>Paracetamol 650 mg</span><span>Pantoprazole 40 mg</span><span>Vitamin D3 60k IU</span></div></div><div class="summary-section ai-summary"><div><span class="sparkle">✦</span><h3>AI clinical summary</h3></div><p>Priya presents with acute, sharp right-sided chest pain of morning onset. Initial conversation does not establish radiation; a focused clinical assessment is recommended to rule out time-sensitive causes.</p></div></section>
+              <aside class="completion-side"><div class="audio-card"><span class="eyebrow">HINDI AUDIO SUMMARY</span><h3>सारांश सुनें</h3><p>Listen to a simple recap in Hindi.</p><button id="audioButton"><span>▶</span> Play summary <em>0:48</em></button><div class="audio-waves"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></div><div class="qr-card"><div class="qr" aria-label="QR code"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div><div><b>ABHA health record</b><p>Scan to securely view this visit on your phone.</p></div></div><button class="primary-action send-button" id="sendDoctor">Send to Doctor <span>→</span></button><button class="print-button" id="printReport">⌘ &nbsp; Print report</button></aside>
+            </div>
+          </article>
+        </section>
+      </main>
+    </div>
+    <div class="toast" id="toast" role="status"><span>✓</span><p><b>Sent securely</b><br />The doctor has received Priya’s intake summary.</p></div>
+    <script src="script.js"></script>
+  </body>
+</html>
