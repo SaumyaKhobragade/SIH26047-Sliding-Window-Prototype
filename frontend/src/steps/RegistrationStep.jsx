@@ -90,8 +90,7 @@ export default function RegistrationStep({ onComplete }) {
             confidence: data.confidence,
             pastVisitCount: data.past_visit_count || 0,
           })
-          // Also get stored patient details from our registry
-          const patientsRes = await fetch(`${API}/patient/identify`, { method: 'POST', body: formData })
+          // Patient already identified above, no need to re-fetch
 
           speakPrompt(`Namaste ${data.patient_name || ''}! Aapko pehchaan liya. Aapke ${data.past_visit_count || 0} purane visits hain. Kya aapki details sahi hain?`)
           setFlowState('returning')
@@ -107,12 +106,21 @@ export default function RegistrationStep({ onComplete }) {
       console.warn('Face identify failed:', err.message)
     }
 
-    // No match — new patient
-    speakPrompt('Namaste! Aap naye patient lagte hain. Chaliye registration shuru karte hain.')
+    // No match — new patient. Combine welcome + first question into one voice.
+    speakPrompt('Namaste! Aap naye patient lagte hain. Chaliye registration shuru karte hain. Aapka poora naam bataiye.')
     setFlowState('new_reg')
   }
 
+  // Track current audio to stop overlapping voices
+  const currentAudioRef = useRef(null)
+  const hasSpokenFirstRef = useRef(false)
+
   const speakPrompt = async (text) => {
+    // Stop any currently playing audio first
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
     setIsSpeaking(true)
     try {
       const res = await fetch(`${API}/tts?text=${encodeURIComponent(text)}&language=hindi`, { method: 'POST' })
@@ -120,8 +128,9 @@ export default function RegistrationStep({ onComplete }) {
         const data = await res.json()
         if (data.audio_base64) {
           const audio = new Audio(`data:audio/wav;base64,${data.audio_base64}`)
-          audio.onended = () => setIsSpeaking(false)
-          audio.onerror = () => setIsSpeaking(false)
+          currentAudioRef.current = audio
+          audio.onended = () => { setIsSpeaking(false); currentAudioRef.current = null }
+          audio.onerror = () => { setIsSpeaking(false); currentAudioRef.current = null }
           audio.play()
           return
         }
@@ -140,9 +149,13 @@ export default function RegistrationStep({ onComplete }) {
     }
   }
 
-  // Speak current registration step prompt
+  // Speak current registration step prompt (skip first one — already spoken in welcome)
   useEffect(() => {
     if (flowState === 'new_reg' && step) {
+      if (!hasSpokenFirstRef.current) {
+        hasSpokenFirstRef.current = true
+        return // Skip — already spoken as part of the welcome message
+      }
       speakPrompt(step.prompt)
     }
   }, [currentStep, flowState])

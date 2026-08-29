@@ -219,7 +219,7 @@ async def identify_patient(face_image: UploadFile = File(...)):
             "matched": True,
             "patient_id": result["patient_id"],
             "confidence": result["confidence"],
-            "patient_name": patient_data.get("name", ""),
+            "patient_name": patient_data.get("name", "") if patient_data else "",
             "past_visit_count": past_visits,
         }
 

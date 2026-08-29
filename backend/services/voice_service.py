@@ -123,20 +123,51 @@ class VoiceService:
                     text=text,
                     model=settings.SARVAM_TTS_MODEL,
                     language_code=lang_code,
-                    speaker="meera",  # Female voice
-                    pitch=0.0,
+                    speaker="priya",  # Female voice
                     pace=1.0,
-                    loudness=1.0,
                 )
 
             response = await asyncio.to_thread(_synthesize)
 
+            # Log response attributes for debugging
+            logger.info("[VOICE] TTS response type: %s, attrs: %s", type(response).__name__, dir(response))
+
+            # V3 may return base64 in 'audios' list
+            if hasattr(response, 'audios') and response.audios:
+                audio_data = response.audios[0]
+                if isinstance(audio_data, str):
+                    # Already base64-encoded
+                    logger.info("[VOICE] TTS complete (V3 audios). Audio generated.")
+                    return audio_data
+                else:
+                    audio_b64 = base64.b64encode(audio_data).decode('utf-8')
+                    logger.info("[VOICE] TTS complete (V3 audios bytes). Audio generated.")
+                    return audio_b64
+
+            # V2 fallback: raw bytes in 'audio'
             if hasattr(response, 'audio') and response.audio:
+                if isinstance(response.audio, str):
+                    logger.info("[VOICE] TTS complete (audio str). Audio generated.")
+                    return response.audio
                 audio_b64 = base64.b64encode(response.audio).decode('utf-8')
                 logger.info("[VOICE] TTS complete. Audio generated.")
                 return audio_b64
 
-            logger.warning("[VOICE] TTS returned empty audio")
+            # Try dict-like access
+            if hasattr(response, '__getitem__'):
+                for key in ('audios', 'audio', 'audio_string'):
+                    try:
+                        val = response[key]
+                        if val:
+                            if isinstance(val, list):
+                                val = val[0]
+                            if isinstance(val, str):
+                                return val
+                            return base64.b64encode(val).decode('utf-8')
+                    except (KeyError, TypeError):
+                        continue
+
+            logger.warning("[VOICE] TTS returned empty audio. Response: %s", str(response)[:500])
             return None
 
         except Exception as e:
