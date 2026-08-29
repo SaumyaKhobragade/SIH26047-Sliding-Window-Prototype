@@ -172,6 +172,11 @@ class ReadbackResponse(BaseModel):
 
 # ── Health Check ──────────────────────────────────────────────────────────────
 
+@app.get("/")
+def root():
+    """Root health check for Render/cloud deployment pingers."""
+    return {"status": "ok", "message": "MediKiosk API is running"}
+
 @app.get("/health")
 def health():
     """
