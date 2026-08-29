@@ -14,6 +14,8 @@ Also generates patient-facing readback text in the conversation style.
 import logging
 from typing import Any, Dict, List, Optional
 
+from services.llm_client import llm_complete
+
 logger = logging.getLogger(__name__)
 
 
@@ -79,11 +81,24 @@ class SummaryGenerator:
             for lab in doc.get("lab_values", []):
                 lab_values.append(lab)
 
+        # Generate AI clinical summary using LLM
+        ai_summary = await self._synthesize_ai_summary(
+            clinical_fields=clinical_fields,
+            hpi=hpi,
+            red_flags=red_flags,
+            past_history=past_history,
+        )
+
+        # Text analysis → derived urgency signal for the doctor
+        urgency = self._assess_urgency(clinical_fields, red_flags)
+
         # Build summary
         summary = {
             "patient_id": patient_id,
             "chief_complaint": clinical_fields.get("chief_complaint", "Not specified"),
             "hpi": hpi,
+            "ai_summary": ai_summary,
+            "urgency": urgency,
             "past_medical_history": self._get_past_medical(clinical_fields, past_history),
             "current_medications": current_meds,
             "allergies": self._get_allergies(clinical_fields),
@@ -108,42 +123,130 @@ class SummaryGenerator:
         return summary
 
     async def generate_readback(
-        self, clinical_fields: Dict[str, str], style_mode: str
+        self,
+        clinical_fields: Dict[str, str],
+        style_mode: str,
+        red_flags: List[str] = None,
     ) -> str:
         """
         Generate patient-facing readback text in the conversation style.
-        PS Requirement: "patient-facing audio confirmation in local language"
+        PS Requirement: "patient-facing audio confirmation in local language".
+        Data-driven: builds from the real collected fields. Falls back to a
+        data-driven template if the LLM is unavailable.
         """
-        cc = clinical_fields.get("chief_complaint", "your symptoms")
-        meds = clinical_fields.get("medications", "no regular medicines")
-        allergies = clinical_fields.get("allergies", "no allergies")
-        family = clinical_fields.get("family_history", "no significant family history")
+        red_flags = red_flags or []
+        f = clinical_fields
+        cc = f.get("chief_complaint", "your symptoms")
+        onset = f.get("onset", "")
+        character = f.get("character", "")
+        severity = f.get("severity", "")
+        meds = f.get("medications", "no regular medicines")
+        allergies = f.get("allergies", "no allergies")
+        associated = f.get("associated_symptoms", "")
+
+        # Build a fuller data-driven readback using every collected field.
+        detail = ""
+        bits = []
+        if onset:
+            bits.append(f"shuru {onset}")
+        if character:
+            bits.append(f"type {character}")
+        if severity:
+            bits.append(f"severity {severity}")
+        if associated and "no" not in associated.lower() and "none" not in associated.lower():
+            bits.append(f"saath mein {associated}")
+        if bits:
+            detail = "; ".join(bits)
 
         if style_mode == "formal_hindi":
-            return (
-                f"Aapne bataya ki aapko {cc}. "
-                f"Aap abhi {meds} le rahe hain. "
-                f"Aapko {allergies} ki allergy hai. "
-                f"Aapke parivaar mein {family}. "
-                f"Kya yeh sab sahi hai?"
-            )
+            s = [f"Namaste. Aapne bataya ki aapko {cc}."]
+            if detail:
+                s.append(f"Yeh {detail}.")
+            s.append(f"Aap abhi {meds} le rahe hain. Aapko {allergies} ki allergy hai.")
+            if red_flags:
+                s.append("Kuch lakshanon ko dekh kar turant medical madad lena zaroori hai.")
+            s.append("Kya yeh sab kuch sahi hai?")
+            return " ".join(s)
         elif style_mode == "english_professional":
-            return (
-                f"You reported {cc}. "
-                f"Your current medications include {meds}. "
-                f"You have allergies to {allergies}. "
-                f"Your family history includes {family}. "
-                f"Is all of this information correct?"
-            )
+            s = [f"You reported {cc}."]
+            if detail:
+                s.append(f"Details: {detail}.")
+            s.append(f"Your current medications include {meds}. You have allergies to {allergies}.")
+            if red_flags:
+                s.append("Some findings warrant prompt medical attention.")
+            s.append("Is all of this information correct?")
+            return " ".join(s)
         else:
             # Hinglish casual (default)
-            return (
-                f"Aapne bataya ki aapko {cc}. "
-                f"Aap currently {meds} le rahe hain. "
-                f"Aapko {allergies} se allergy hai. "
-                f"Family mein {family}. "
-                f"Kya yeh sab sahi hai?"
+            s = [f"Aapne bataya ki aapko {cc}."]
+            if detail:
+                s.append(f"Details: {detail}.")
+            s.append(f"Aap currently {meds} le rahe hain. Aapko {allergies} se allergy hai.")
+            if red_flags:
+                s.append("Kuch cheezein dekh kar jaldi se doctor ke paas jaana zaroori hai.")
+            s.append("Kya yeh sab sahi hai?")
+            return " ".join(s)
+
+    # ── LLM Clinical Synthesis ─────────────────────────────────────────────
+
+    _AI_SUMMARY_SYSTEM = (
+        "You are an expert clinical scribe. "
+        "Write a concise 2-3 sentence AI clinical summary for the attending doctor. "
+        "Tone: professional, third-person, present-tense medical English. "
+        "Include: chief complaint, key SOCRATES findings, relevant history, "
+        "and any red flags. Do NOT suggest diagnoses. "
+        "Max 80 words. Output plain text only — no bullet points, no headings."
+    )
+
+    async def _synthesize_ai_summary(
+        self,
+        clinical_fields: Dict[str, str],
+        hpi: str,
+        red_flags: List[str],
+        past_history: Dict[str, Any],
+    ) -> str:
+        """
+        Call LLM to synthesize a doctor-grade AI clinical summary.
+        Falls back to a structured template if LLM unavailable.
+        """
+        chronic = past_history.get("chronic_conditions", [])
+        past_meds = past_history.get("past_medications", [])
+
+        prompt_parts = [
+            f"Chief Complaint: {clinical_fields.get('chief_complaint', 'Not specified')}",
+            f"HPI: {hpi}",
+        ]
+        if clinical_fields.get("past_medical"):
+            prompt_parts.append(f"Past Medical History: {clinical_fields['past_medical']}")
+        if chronic:
+            prompt_parts.append(f"Known Chronic Conditions: {', '.join(chronic)}")
+        if clinical_fields.get("medications"):
+            prompt_parts.append(f"Current Medications: {clinical_fields['medications']}")
+        if clinical_fields.get("allergies"):
+            prompt_parts.append(f"Allergies: {clinical_fields['allergies']}")
+        if red_flags:
+            prompt_parts.append(f"Red Flags Detected: {'; '.join(red_flags)}")
+
+        prompt = "Clinical data:\n" + "\n".join(prompt_parts) + "\n\nAI clinical summary:"
+
+        result = await llm_complete(prompt, system=self._AI_SUMMARY_SYSTEM, max_tokens=120)
+        result = result.strip()
+
+        if not result or len(result) < 20:
+            # Fallback template if LLM unavailable
+            cc = clinical_fields.get("chief_complaint", "unspecified complaint")
+            flag_note = (
+                " Red flags noted — timely clinical review advised."
+                if red_flags else
+                " No acute red flags identified at intake."
             )
+            result = (
+                f"Patient presents with {cc}. "
+                f"SOCRATES assessment completed via AI-assisted kiosk intake.{flag_note}"
+            )
+
+        logger.info("[SUMMARY] AI clinical summary generated (%d chars)", len(result))
+        return result
 
     @staticmethod
     def _build_hpi(fields: Dict[str, str]) -> str:
@@ -266,6 +369,51 @@ class SummaryGenerator:
         if associated:
             return f"Positive for: {associated}. Remaining systems not assessed in kiosk intake."
         return "Not assessed in kiosk intake."
+
+    @staticmethod
+    def _assess_urgency(
+        fields: Dict[str, str], red_flags: List[str]
+    ) -> Dict[str, Any]:
+        """
+        Text analysis helper: derive a triage urgency level from the collected
+        severity rating and any detected red flags. This is a deterministic
+        rule (safety-critical → never free-form LLM), so it's simple and auditable.
+        """
+        max_severity = 0.0
+        raw_sev = (fields.get("severity", "") or "").lower()
+        # Extract a numeric severity like "7", "7/10", "8 out of 10".
+        import re
+        m = re.search(r"(\d{1,2})", raw_sev)
+        if m:
+            max_severity = min(10.0, float(m.group(1)))
+
+        critical = any("[CRITICAL]" in f for f in red_flags)
+        high = any("[HIGH]" in f for f in red_flags)
+        count = len(red_flags)
+
+        if critical:
+            level = "CRITICAL"
+        elif high or count >= 2:
+            level = "HIGH"
+        elif max_severity >= 7:
+            level = "HIGH"
+        elif max_severity >= 4:
+            level = "MODERATE"
+        else:
+            level = "LOW"
+
+        return {
+            "level": level,
+            "severity_score": max_severity,
+            "red_flag_count": count,
+            "note": (
+                "Immediate clinical attention advised."
+                if level in ("CRITICAL", "HIGH")
+                else "Routine review within standard triage timeframe."
+                if level == "MODERATE"
+                else "No urgent findings at intake."
+            ),
+        }
 
     @staticmethod
     def _build_timeline(

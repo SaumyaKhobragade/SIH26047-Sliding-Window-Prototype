@@ -21,6 +21,8 @@ import uuid
 from typing import Any, Dict, List, Optional
 from enum import Enum
 
+from services.llm_client import llm_complete
+
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
@@ -209,43 +211,50 @@ HINDI_LATIN_WORDS = {
 
 def detect_language_ratios(text: str) -> Dict[str, float]:
     """
-    Analyze text and return language ratios.
-    Uses character-set detection (Devanagari vs Latin) + keyword matching.
+    Analyze text and return word-level language ratios (hindi/english/hinglish).
+
+    Improvement over pure keyword counting: classifies EACH word as Devanagari
+    (hindi), a known Hindi word written in Latin script (hindi), or English,
+    then computes ratios from word counts. 'Hinglish' is reported when there's
+    a substantial Hindi-English mix rather than a single dominant language.
     """
-    words = text.lower().split()
+    words = [w for w in text.lower().split() if w]
     if not words:
         return {"hindi": 33, "english": 33, "hinglish": 34}
 
-    devanagari_count = len(DEVANAGARI_PATTERN.findall(text))
-    hindi_latin_count = sum(1 for w in words if w in HINDI_LATIN_WORDS)
-    total_words = len(words)
+    hindi_words = 0
 
-    if devanagari_count > 0:
-        # Pure Devanagari script detected
-        hindi_ratio = min(80, 40 + devanagari_count * 5)
-        english_ratio = max(5, 100 - hindi_ratio - 15)
-        hinglish_ratio = 100 - hindi_ratio - english_ratio
-    elif hindi_latin_count > 0:
-        # Romanized Hindi words detected
-        hindi_word_pct = (hindi_latin_count / total_words) * 100
-        if hindi_word_pct > 60:
-            hindi_ratio = 55
-            english_ratio = 15
-            hinglish_ratio = 30
-        elif hindi_word_pct > 30:
-            hindi_ratio = 35
-            english_ratio = 25
-            hinglish_ratio = 40
-        else:
-            hindi_ratio = 20
-            english_ratio = 45
-            hinglish_ratio = 35
+    # Stopwords/function words that carry language signal — cheap & robust.
+    def _is_hindi_latin(w: str) -> bool:
+        if w in HINDI_LATIN_WORDS:
+            return True
+        # Root-based match for common inflected forms (e.g. "hoo", "rahe",
+        # "batao", "karte") that won't be in the exact keyword set.
+        for root in ("kar", "ho", "hai", "raha", "tha", "nahi", "bata", "le"):
+            if w.startswith(root) and len(w) <= len(root) + 2:
+                return True
+        return False
+
+    for w in words:
+        if DEVANAGARI_PATTERN.search(w):
+            hindi_words += 1
+        elif _is_hindi_latin(w):
+            hindi_words += 1
+
+    total = len(words)
+    hindi_pct = (hindi_words / total) * 100
+    english_pct = 100 - hindi_pct
+
+    # Classify language mode from the split.
+    if hindi_pct >= 60:
+        hindi_ratio, english_ratio = min(85, hindi_pct + 15), max(5, english_pct - 15)
+    elif english_pct >= 60:
+        hindi_ratio, english_ratio = max(5, hindi_pct - 15), min(85, english_pct + 15)
     else:
-        # Mostly English
-        hindi_ratio = 10
-        english_ratio = 70
-        hinglish_ratio = 20
+        # Mixed → code-mixed Hinglish dominates.
+        hindi_ratio, english_ratio = hindi_pct, english_pct
 
+    hinglish_ratio = 100 - hindi_ratio - english_ratio
     return {
         "hindi": round(hindi_ratio),
         "english": round(english_ratio),
@@ -255,16 +264,23 @@ def detect_language_ratios(text: str) -> Dict[str, float]:
 
 def compute_rolling_style(turns: List[ConversationTurn]) -> str:
     """
-    Determine style mode based on rolling window of last 3-4 patient turns.
-    Uses 3 discrete modes — no smooth blending.
+    Determine style mode based on a recency-weighted sliding window of the
+    last 3-4 patient turns. The most recent turn is weighted highest so the
+    kiosk snaps to the patient's CURRENT language rather than lagging on an
+    old average. Uses 3 discrete modes — no smooth blending.
     """
     patient_turns = [t for t in turns if t.role == "patient"][-4:]
 
     if not patient_turns:
         return StyleMode.HINGLISH_CASUAL
 
-    avg_hindi = sum(t.language_ratios.get("hindi", 33) for t in patient_turns) / len(patient_turns)
-    avg_english = sum(t.language_ratios.get("english", 33) for t in patient_turns) / len(patient_turns)
+    # Recency weights: oldest turn gets least, newest gets most.
+    n = len(patient_turns)
+    weights = [0.4 + 0.6 * (i / max(1, n - 1)) for i in range(n)]
+    weight_sum = sum(weights)
+
+    avg_hindi = sum(t.language_ratios.get("hindi", 33) * w for t, w in zip(patient_turns, weights)) / weight_sum
+    avg_english = sum(t.language_ratios.get("english", 33) * w for t, w in zip(patient_turns, weights)) / weight_sum
 
     if avg_hindi > 55:
         return StyleMode.FORMAL_HINDI
@@ -278,34 +294,47 @@ def detect_red_flags(text: str, accumulated_text: str = "") -> List[str]:
     """
     Template-based red flag detection.
     Uses pre-validated keyword patterns, NOT free LLM generation.
+
+    Design rules (revised):
+      - Patterns WITH modifiers: primary keyword must appear in the CURRENT turn
+        AND at least one modifier must appear in current OR accumulated text.
+        Without a modifier match → do NOT flag. Prevents false positives from
+        incidental words like "blood" in past medical history.
+      - Patterns WITHOUT modifiers (seizure, syncope, suicide): match on either
+        current or accumulated text and fire immediately at full severity.
     """
+    current = text.lower()
     combined = f"{accumulated_text} {text}".lower()
     flags = []
 
     for pattern in RED_FLAG_PATTERNS:
-        # Check exact phrase matches first
-        primary_match = any(kw in combined for kw in pattern["keywords"])
+        has_modifiers = bool(pattern["modifiers"])
 
-        # Also check keyword pairs (words that appear anywhere in text)
-        if not primary_match and "keyword_pairs" in pattern:
-            for pair in pattern["keyword_pairs"]:
-                if all(word in combined for word in pair):
-                    primary_match = True
-                    break
+        if has_modifiers:
+            # For modifier-gated patterns: keyword MUST appear in the CURRENT turn
+            primary_match = any(kw in current for kw in pattern["keywords"])
 
-        if not primary_match:
-            continue
+            # Check keyword pairs against current turn only
+            if not primary_match and "keyword_pairs" in pattern:
+                for pair in pattern["keyword_pairs"]:
+                    if all(word in current for word in pair):
+                        primary_match = True
+                        break
 
-        # If modifiers exist, at least one must also match for high-confidence flag
-        if pattern["modifiers"]:
+            if not primary_match:
+                continue
+
+            # Modifier must appear somewhere in current OR accumulated context
             modifier_match = any(mod in combined for mod in pattern["modifiers"])
             if modifier_match:
                 flags.append(f"[{pattern['severity']}] {pattern['alert']}")
-            else:
-                # Still flag but at lower severity if no modifier
-                flags.append(f"[MODERATE] {pattern['alert']}")
+            # else: no modifier → do NOT flag. Bare keyword (e.g. "blood") is not enough.
+
         else:
-            flags.append(f"[{pattern['severity']}] {pattern['alert']}")
+            # Patterns without modifiers: match anywhere in combined history
+            primary_match = any(kw in combined for kw in pattern["keywords"])
+            if primary_match:
+                flags.append(f"[{pattern['severity']}] {pattern['alert']}")
 
     return flags
 
@@ -375,11 +404,12 @@ class ACIEngine:
         session.current_style = new_style
         session.language_ratios = ratios
 
-        # 4. Store the clinical field value
+        # 4. Store the clinical field value — LLM-normalize to clean English
         current_q_index = session.current_question_index
         if current_q_index < len(CLINICAL_QUESTIONS):
             field_name = CLINICAL_QUESTIONS[current_q_index]["field"]
-            session.clinical_fields_collected[field_name] = patient_text
+            normalized = await _normalize_field(field_name, patient_text)
+            session.clinical_fields_collected[field_name] = normalized
 
         # 5. Check red flags (accumulated context)
         all_patient_text = " ".join(t.text for t in session.turns if t.role == "patient")
@@ -441,3 +471,51 @@ class ACIEngine:
             "hinglish": StyleMode.HINGLISH_CASUAL,
         }
         return mapping.get(language, StyleMode.HINGLISH_CASUAL)
+
+
+# ── Field Normalization ───────────────────────────────────────────────────────
+
+# Concise field descriptions for the normalization prompt
+_FIELD_DESCRIPTIONS = {
+    "chief_complaint": "chief medical complaint (e.g. 'Headache', 'Chest pain')",
+    "onset": "symptom onset duration (e.g. '5 days ago', '2 weeks')",
+    "character": "pain character (e.g. 'dull aching', 'sharp throbbing', 'burning')",
+    "radiation": "radiation or spreading of pain (e.g. 'radiates to left arm', 'no radiation')",
+    "associated_symptoms": "associated symptoms (e.g. 'nausea, vomiting, dizziness')",
+    "timing": "pain timing pattern (e.g. 'constant', 'intermittent', 'worse at night')",
+    "exacerbating": "exacerbating and relieving factors (e.g. 'worse with movement, better with rest')",
+    "severity": "pain severity on 0-10 scale (e.g. '7/10')",
+    "past_medical": "past medical history (e.g. 'Type 2 Diabetes, Hypertension')",
+    "medications": "current medications (e.g. 'Metformin 500mg BD, Amlodipine 5mg OD')",
+    "allergies": "drug or food allergies (e.g. 'No known allergies' or 'Penicillin — rash')",
+    "family_history": "family medical history (e.g. 'Father: hypertension, Mother: diabetes')",
+}
+
+_NORMALIZE_SYSTEM = (
+    "You are a clinical scribe assistant. "
+    "Your ONLY job is to convert messy patient speech (may be Hinglish, Hindi-English mix, or broken English) "
+    "into a single clean, concise English clinical phrase suitable for a doctor's record. "
+    "Rules: (1) Output ONLY the normalized phrase — no explanations, no punctuation beyond commas. "
+    "(2) Keep it factual — do not infer or add information not present. "
+    "(3) If the patient said 'no' / 'nahi' / 'none', output 'None reported'. "
+    "(4) Keep numeric values exact. (5) Max 15 words."
+)
+
+
+async def _normalize_field(field_name: str, raw_text: str) -> str:
+    """
+    Use LLM to convert raw patient Hinglish answer into clean English clinical text.
+    Falls back to raw_text if LLM unavailable.
+    """
+    description = _FIELD_DESCRIPTIONS.get(field_name, "clinical information")
+    prompt = (
+        f"Field: {description}\n"
+        f"Patient said: \"{raw_text}\"\n"
+        f"Normalized clinical phrase:"
+    )
+    result = await llm_complete(prompt, system=_NORMALIZE_SYSTEM, max_tokens=40)
+    cleaned = result.strip().strip('"').strip("'")
+    if not cleaned or len(cleaned) < 2:
+        return raw_text  # fallback
+    logger.debug("[ACI] Normalized '%s' → '%s'", raw_text[:40], cleaned)
+    return cleaned

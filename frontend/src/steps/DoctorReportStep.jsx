@@ -1,10 +1,15 @@
 import { useState, useEffect } from 'react'
+import {
+  Check, Brain, AlertTriangle, ClipboardList, Calendar, Volume2, Paperclip,
+  Sparkles, Play, Pause, FileText, Printer, RotateCcw, PencilLine, ThumbsUp, ThumbsDown, ShieldCheck,
+} from 'lucide-react'
 
-const PAST_HISTORY_RAG = {
+// Mock fallback ONLY for offline/demo mode — real backend summary data always wins.
+const MOCK_PAST_HISTORY = {
   visits: [
-    { date: '2024-03-15', doctor: 'Dr. A. Shah, General Medicine', complaint: 'Routine checkup — elevated blood sugar detected', diagnosis: 'Type 2 Diabetes Mellitus, Essential Hypertension', prescribed: ['Metformin 500mg BD', 'Amlodipine 5mg OD'] },
-    { date: '2025-02-20', doctor: 'City Pathology Lab', complaint: 'Routine lab work', diagnosis: 'HbA1c 8.1% (uncontrolled), Total Cholesterol 242 mg/dL (high)', prescribed: [], isLab: true },
-    { date: '2025-02-28', doctor: 'Dr. R. Patel, Endocrinology', complaint: 'Follow-up for uncontrolled diabetes', diagnosis: 'Uncontrolled Type 2 DM, Hyperlipidemia', prescribed: ['Glimepiride 1mg OD (added)', 'Atorvastatin 10mg HS (added)'] },
+    { date: '2024-03-15', doctor: 'Dr. A. Shah, General Medicine', summary: 'Routine checkup — elevated blood sugar detected', diagnoses: ['Type 2 Diabetes Mellitus, Essential Hypertension'], medications: ['Metformin 500mg BD', 'Amlodipine 5mg OD'], isLab: false },
+    { date: '2025-02-20', doctor: 'City Pathology Lab', summary: 'Routine lab work', diagnoses: ['HbA1c 8.1% (uncontrolled), Total Cholesterol 242 mg/dL (high)'], medications: [], isLab: true },
+    { date: '2025-02-28', doctor: 'Dr. R. Patel, Endocrinology', summary: 'Follow-up for uncontrolled diabetes', diagnoses: ['Uncontrolled Type 2 DM, Hyperlipidemia'], medications: ['Glimepiride 1mg OD (added)', 'Atorvastatin 10mg HS (added)'], isLab: false },
   ],
   chronicConditions: ['Type 2 Diabetes Mellitus (since 2024)', 'Essential Hypertension (since 2024)', 'Hyperlipidemia (since 2025)'],
   currentMedications: ['Metformin 500mg BD', 'Amlodipine 5mg OD', 'Glimepiride 1mg OD', 'Atorvastatin 10mg HS'],
@@ -30,19 +35,40 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
   const fields = conversation?.clinicalFields || conversation?.collectedFields || {}
   const messages = conversation?.messages || []
 
+  // Prefer real backend summary/RAG data; fall back to mock only in offline mode.
+  const hasRealData = Boolean(summaryData)
   const chiefComplaint = s.chief_complaint || fields.chief_complaint || extractFromMessages('complaint') || 'Not provided'
-  const medications = s.current_medications || splitField(fields.medications) || []
-  const allergies = s.allergies || splitField(fields.allergies) || []
-  const familyHistory = s.family_history || splitField(fields.family_history) || []
+  const medications = (s.current_medications && s.current_medications.length ? s.current_medications : null) || splitField(fields.medications) || []
+  const allergies = (s.allergies && s.allergies.length ? s.allergies : null) || splitField(fields.allergies) || []
+  const familyHistory = (s.family_history && s.family_history.length ? s.family_history : null) || splitField(fields.family_history) || []
   const pastMedical = s.past_medical_history || []
   const redFlags = s.red_flags || conversation?.redFlags || []
-  const pastVisits = s.past_visits || (faceMatched ? PAST_HISTORY_RAG.visits : [])
+  const hasPastVisits = (s.past_visits || []).length > 0
+  const pastVisits = hasPastVisits
+    ? s.past_visits
+    : (hasRealData ? [] : (faceMatched ? MOCK_PAST_HISTORY.visits : []))
+
+  // Normalize a backend RAG timeline entry into the renderer's shape if needed.
+  function normalizeVisit(visit) {
+    if (visit.diagnosis || visit.complaint) return visit // already mock/legacy shape
+    return {
+      date: visit.date,
+      doctor: visit.doctor,
+      summary: visit.summary,
+      diagnoses: Array.isArray(visit.summary) ? visit.summary : (visit.summary ? [visit.summary] : []),
+      medications: visit.medications || [],
+      type: visit.type,
+      isLab: visit.type === 'lab_report',
+    }
+  }
 
   function splitField(val) {
     if (!val) return []
     if (Array.isArray(val)) return val
     return val.split(',').map(v => v.trim()).filter(Boolean)
   }
+
+  function suffix(n) { return n === 1 ? '' : 's' }
 
   function extractFromMessages(keyword) {
     const patientMsgs = messages.filter(m => m.role === 'patient').map(m => m.text)
@@ -59,7 +85,8 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
     .filter(Boolean)
 
   const allMeds = medications.length > 0 ? medications :
-    faceMatched ? PAST_HISTORY_RAG.currentMedications : prescriptionMeds
+    hasRealData ? [] :
+      faceMatched ? MOCK_PAST_HISTORY.currentMedications : prescriptionMeds
 
   if (isLoading) {
     return (
@@ -85,25 +112,34 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
           <h1>Your story, <i>clearly told.</i></h1>
         </div>
         <div className="complete-mark">
-          <span>✓</span>
+          <Check size={18} color="var(--accent-green)" />
           <small>INTAKE COMPLETE</small>
         </div>
       </div>
 
       {/* RAG indicator */}
-      {faceMatched && showRAG && (
+      {hasPastVisits && showRAG && (
         <div className="rag-indicator" style={{ marginBottom: 20 }}>
-          <span className="icon">🧠</span>
+          <Brain size={18} />
           <span>
-            <strong>RAG Pipeline:</strong> Face matched to existing patient. {pastVisits.length} prior visits retrieved from ChromaDB.
+            <strong>RAG Pipeline:</strong> Returning patient identified. {pastVisits.length} prior visit{suffix(pastVisits.length)} retrieved and merged into this record.
           </span>
+        </div>
+      )}
+
+      {/* Urgency banner (text analysis) */}
+      {s.urgency && (
+        <div className={`urgency-banner urgency-${(s.urgency.level || '').toLowerCase()}`} style={{ marginBottom: 20 }}>
+          <span className="urgency-label">TRIAGE</span>
+          <strong>{s.urgency.level}</strong>
+          <span>{s.urgency.note}</span>
         </div>
       )}
 
       {/* Red flag */}
       {redFlags.length > 0 && (
         <div className="red-flag-alert">
-          <span className="red-flag-icon">🚨</span>
+          <span className="red-flag-icon"><AlertTriangle size={20} color="var(--accent-red)" /></span>
           <div className="red-flag-content">
             <h3>Priority Alert — Red Flag Detected</h3>
             <p>{redFlags.join(' • ')}</p>
@@ -117,15 +153,15 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
         padding: 4, borderRadius: 'var(--radius-md)', border: '1px solid var(--border-color)',
       }}>
         {[
-          { id: 'summary', label: '📋 Clinical Summary' },
-          { id: 'timeline', label: '📅 Timeline' },
-          { id: 'readback', label: '🔊 Hindi Readback' },
+          { id: 'summary', label: 'Clinical Summary', Icon: ClipboardList },
+          { id: 'timeline', label: 'Timeline', Icon: Calendar },
+          { id: 'readback', label: 'Hindi Readback', Icon: Volume2 },
         ].map(tab => (
           <button
             key={tab.id}
             onClick={() => setActiveTab(tab.id)}
             style={{
-              flex: 1, padding: '10px 16px',
+              flex: 1, padding: '10px 16px', display: 'inline-flex', alignItems: 'center', gap: 6, justifyContent: 'center',
               background: activeTab === tab.id ? 'var(--accent-teal-dim)' : 'transparent',
               border: activeTab === tab.id ? '1px solid rgba(20,184,166,0.3)' : '1px solid transparent',
               borderRadius: 'var(--radius-sm)',
@@ -134,6 +170,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
               cursor: 'pointer', transition: 'var(--transition-fast)',
             }}
           >
+            <tab.Icon size={16} />
             {tab.label}
           </button>
         ))}
@@ -149,7 +186,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
                 <h2>{patient?.name || 'Patient'}</h2>
                 <p>Generated {today}</p>
               </div>
-              <span className="secure-badge">⌁ Secure</span>
+              <span className="secure-badge"><ShieldCheck size={13} /> Secure</span>
             </div>
 
             <div className="summary-person">
@@ -195,9 +232,9 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
               ) : (
                 <p style={{ color: 'var(--text-muted)', fontStyle: 'italic' }}>Not reported during this interview.</p>
               )}
-              {faceMatched && allMeds.length > 0 && (
-                <div style={{ fontSize: 12, color: 'var(--accent-blue)', marginTop: 8, fontStyle: 'italic' }}>
-                  📎 Source: RAG pipeline ({pastVisits.length} prior visits)
+              {allMeds.length > 0 && (
+                <div style={{ fontSize: 12, color: 'var(--accent-blue)', marginTop: 8, fontStyle: 'italic', display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <Paperclip size={13} /> Source: {hasPastVisits || hasRealData ? `RAG pipeline (${pastVisits.length} prior visits)` : 'Prescription scan'}
                 </div>
               )}
             </div>
@@ -205,7 +242,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
             {/* AI summary */}
             <div className="summary-section ai-summary">
               <div>
-                <span className="sparkle">✦</span>
+                <span className="sparkle"><Sparkles size={16} color="var(--accent-teal)" /></span>
                 <h3>AI clinical summary</h3>
               </div>
               <p>
@@ -219,36 +256,45 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
             </div>
 
             {/* Past medical history */}
-            {(faceMatched || pastMedical.length > 0) && (
-              <div className="summary-section">
-                <h3>Past Medical / Surgical History</h3>
-                {faceMatched && pastVisits.length > 0 ? (
-                  <div>
-                    {PAST_HISTORY_RAG.chronicConditions.map((c, i) => (
-                      <div key={i} style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>• {c}</div>
-                    ))}
-                  </div>
-                ) : pastMedical.length > 0 ? (
-                  pastMedical.map((item, i) => (
-                    <div key={i} style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>• {item}</div>
-                  ))
-                ) : (
-                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 13 }}>No past medical history available.</p>
-                )}
-              </div>
-            )}
+            <div className="summary-section">
+              <h3>Past Medical / Surgical History</h3>
+              {(pastMedical.length > 0 || (hasPastVisits && faceMatched)) ? (
+                <div>
+                  {pastMedical.length > 0
+                    ? pastMedical.map((item, i) => (
+                        <div key={i} style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>• {item}</div>
+                      ))
+                    : hasPastVisits
+                      ? (pastVisits.flatMap(v => normalizeVisit(v).diagnoses || []).filter(Boolean)).map((c, i) => (
+                          <div key={i} style={{ marginBottom: 4, fontSize: 13, color: 'var(--text-secondary)' }}>• {c}</div>
+                        ))
+                      : null}
+                  {pastMedical.length === 0 && hasPastVisits && (
+                    <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 13 }}>
+                      Derived from {pastVisits.length} prior visit{suffix(pastVisits.length)} in RAG history.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 13 }}>No past medical history available.</p>
+              )}
+            </div>
 
             {/* Allergies */}
-            {(allergies.length > 0 || faceMatched) && (
+            <div className="summary-section">
+              <h3>Drug Allergies</h3>
+              {allergies.length > 0 ? (
+                allergies.map((a, i) => <div key={i} style={{ color: 'var(--accent-red)', fontWeight: 600, fontSize: 13 }}>• {a}</div>)
+              ) : (
+                <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 13 }}>No known drug allergies reported.</p>
+              )}
+            </div>
+
+            {/* Family history */}
+            {familyHistory.length > 0 && (
               <div className="summary-section">
-                <h3>Drug Allergies</h3>
-                {allergies.length > 0 ? (
-                  allergies.map((a, i) => <div key={i} style={{ color: 'var(--accent-red)', fontWeight: 600, fontSize: 13 }}>• {a}</div>)
-                ) : faceMatched ? (
-                  PAST_HISTORY_RAG.allergies.map((a, i) => <div key={i} style={{ color: 'var(--accent-red)', fontWeight: 600, fontSize: 13 }}>• {a}</div>)
-                ) : (
-                  <p style={{ color: 'var(--text-muted)', fontStyle: 'italic', fontSize: 13 }}>No known drug allergies reported.</p>
-                )}
+                <h3>Family History</h3>
+                {familyHistory.map((fh, i) => <div key={i} style={{ fontSize: 13, color: 'var(--text-secondary)' }}>• {fh}</div>)}
               </div>
             )}
           </section>
@@ -261,7 +307,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
               <h3>सारांश सुनें</h3>
               <p>Listen to a simple recap in Hindi.</p>
               <button id="audioButton" onClick={() => setIsPlayingAudio(v => !v)}>
-                <span>{isPlayingAudio ? '⏸' : '▶'}</span>
+                {isPlayingAudio ? <Pause size={16} /> : <Play size={16} />}
                 {isPlayingAudio ? 'Playing…' : 'Play summary'}
                 <em>0:48</em>
               </button>
@@ -289,7 +335,9 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
 
             {/* Status badge */}
             <span className={`status-badge ${reportStatus}`} style={{ alignSelf: 'flex-start' }}>
-              {reportStatus === 'draft' ? '📝 Draft — Awaiting Confirmation' : '✅ Confirmed'}
+              {reportStatus === 'draft'
+                ? <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><FileText size={14} /> Draft — Awaiting Confirmation</span>
+                : <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}><Check size={14} /> Confirmed</span>}
             </span>
 
             {/* Send to doctor */}
@@ -311,17 +359,17 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
                   Send to Doctor <span>→</span>
                 </button>
                 <button className="print-button" id="printReport" onClick={() => window.print()}>
-                  ⌘ &nbsp; Print report
+                  <Printer size={15} /> Print report
                 </button>
               </>
             ) : (
               <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--accent-green)', fontWeight: 600, fontSize: 14 }}>
-                ✅ Report confirmed and saved to patient record. ABHA linked.
+                <Check size={16} /> Report confirmed and saved to patient record. ABHA linked.
               </div>
             )}
 
             <button className="btn btn-secondary btn-full" onClick={onReset} style={{ marginTop: 4 }}>
-              🔄 New Patient
+              <RotateCcw size={16} /> New Patient
             </button>
           </aside>
         </div>
@@ -333,33 +381,40 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
             Chronological Medical Timeline
           </h3>
           <div className="timeline">
-            {faceMatched && pastVisits.map((visit, i) => (
-              <div key={i} className="timeline-item">
-                <div className={`timeline-dot${visit.isLab ? ' warning' : ''}`} />
-                <div className="timeline-date">{visit.date}</div>
-                <div className="timeline-content">
-                  <strong>{visit.doctor}</strong>
-                  <div style={{ marginTop: 4 }}>{visit.complaint}</div>
-                  <div style={{ marginTop: 4 }}><span style={{ color: 'var(--text-muted)', fontSize: 13 }}>Dx:</span> {visit.diagnosis}</div>
-                  {visit.prescribed?.length > 0 && (
-                    <div style={{ marginTop: 4, fontSize: 13 }}>
-                      <span style={{ color: 'var(--text-muted)' }}>Rx:</span> {visit.prescribed.join(', ')}
-                    </div>
-                  )}
+            {pastVisits.length > 0 && pastVisits.map((visit, i) => {
+              const v = normalizeVisit(visit)
+              const diagnoses = v.diagnoses || (v.diagnosis ? [v.diagnosis] : [])
+              const meds = v.medications || v.prescribed || []
+              return (
+                <div key={i} className="timeline-item">
+                  <div className={`timeline-dot${v.isLab ? ' warning' : ''}`} />
+                  <div className="timeline-date">{v.date}</div>
+                  <div className="timeline-content">
+                    <strong>{v.doctor}</strong>
+                    <div style={{ marginTop: 4 }}>{v.complaint || v.summary}</div>
+                    {diagnoses.length > 0 && (
+                      <div style={{ marginTop: 4 }}><span style={{ color: 'var(--text-muted)', fontSize: 13 }}>Dx:</span> {diagnoses.join(', ')}</div>
+                    )}
+                    {meds.length > 0 && (
+                      <div style={{ marginTop: 4, fontSize: 13 }}>
+                        <span style={{ color: 'var(--text-muted)' }}>Rx:</span> {meds.join(', ')}
+                      </div>
+                    )}
+                  </div>
                 </div>
-              </div>
-            ))}
+              )
+            })}
             <div className="timeline-item">
               <div className="timeline-dot current" />
               <div className="timeline-date">{new Date().toISOString().split('T')[0]} (Today)</div>
               <div className="timeline-content">
                 <strong>Current Visit — Aarogya AI Intake</strong>
                 <div style={{ marginTop: 4 }}>Chief Complaint: {chiefComplaint}</div>
-                {redFlags.length > 0 && <div style={{ marginTop: 4 }}><span className="badge-abnormal">🚨 {redFlags[0]}</span></div>}
+                {redFlags.length > 0 && <div style={{ marginTop: 4 }}><span className="badge-abnormal"><AlertTriangle size={12} /> {redFlags[0]}</span></div>}
               </div>
             </div>
           </div>
-          {!faceMatched && (
+          {pastVisits.length === 0 && (
             <div style={{ textAlign: 'center', padding: 32, color: 'var(--text-muted)', fontSize: 14 }}>
               No prior visits found. This is a first-time patient.<br />Timeline will build over subsequent visits.
             </div>
@@ -369,7 +424,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
 
       {activeTab === 'readback' && (
         <div className="glass-card" style={{ maxWidth: '100%' }}>
-          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 22, fontWeight: 400, marginBottom: 8 }}>🔊 Patient Audio Readback</h3>
+          <h3 style={{ fontFamily: 'var(--font-display)', fontSize: 22, fontWeight: 400, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 8 }}><Volume2 size={22} /> Patient Audio Readback</h3>
           <p style={{ color: 'var(--text-secondary)', fontSize: 14, marginBottom: 20 }}>
             Summary is read back to the patient in their language for verification before submission.
           </p>
@@ -385,7 +440,7 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
             </div>
 
             <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginTop: 16, padding: '12px 16px', background: 'rgba(20,184,166,0.08)', borderRadius: 'var(--radius-md)' }}>
-              <button style={{ width: 44, height: 44, borderRadius: '50%', border: 'none', background: 'var(--accent-teal)', color: 'white', fontSize: 18, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>▶</button>
+              <button style={{ width: 44, height: 44, borderRadius: '50%', border: 'none', background: 'var(--accent-teal)', color: 'white', cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center' }}><Play size={18} /></button>
               <div style={{ flex: 1 }}>
                 <div style={{ height: 4, background: 'rgba(255,255,255,0.1)', borderRadius: 2, overflow: 'hidden' }}>
                   <div style={{ width: '0%', height: '100%', background: 'var(--accent-teal)', borderRadius: 2 }} />
@@ -402,33 +457,33 @@ export default function DoctorReportStep({ patient, conversation, prescriptions,
               }
               setReportStatus('confirmed'); onSendToDoctor?.()
             }}>
-              ✅ "Haan, sahi hai" (Yes, correct)
+              <ThumbsUp size={16} /> "Haan, sahi hai" (Yes, correct)
             </button>
             <button className="btn btn-secondary" style={{ flex: 1 }}>
-              ❌ "Nahi, change karna hai"
+              <ThumbsDown size={16} /> "Nahi, change karna hai"
             </button>
           </div>
         </div>
       )}
 
       <div className="action-bar" style={{ marginTop: 20 }}>
-        <button className="btn btn-secondary" onClick={onReset}>🔄 New Patient</button>
+        <button className="btn btn-secondary" onClick={onReset}><RotateCcw size={16} /> New Patient</button>
         {reportStatus === 'draft' && (
           <div style={{ display: 'flex', gap: 10 }}>
-            <button className="btn btn-secondary">✏️ Edit Summary</button>
+            <button className="btn btn-secondary"><PencilLine size={16} /> Edit Summary</button>
             <button className="btn btn-primary btn-lg" onClick={async () => {
               if (patientId && sessionId && apiBase) {
                 try { await fetch(`${apiBase}/summary/confirm?patient_id=${patientId}&session_id=${sessionId}`, { method: 'POST' }) } catch {}
               }
               setReportStatus('confirmed'); onSendToDoctor?.()
             }}>
-              ✅ Confirm &amp; Save to Record
+              <Check size={16} /> Confirm &amp; Save to Record
             </button>
           </div>
         )}
         {reportStatus === 'confirmed' && (
           <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--accent-green)', fontWeight: 600, fontSize: 14 }}>
-            ✅ Report confirmed and saved to patient record. ABHA linked.
+            <Check size={16} /> Report confirmed and saved to patient record. ABHA linked.
           </div>
         )}
       </div>

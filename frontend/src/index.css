@@ -2354,6 +2354,13 @@ body {
 .red-flag-content h3 { font-size: 14px; font-weight: 700; color: var(--accent-red); margin-bottom: 4px; }
 .red-flag-content p { font-size: 13px; color: #991b1b; }
 
+.urgency-banner { border-radius: var(--radius-md); padding: 10px 16px; display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.urgency-label { font-size: 10px; font-weight: 800; letter-spacing: 0.08em; opacity: 0.7; }
+.urgency-banner strong { font-size: 12px; letter-spacing: 0.04em; }
+.urgency-banner.urgency-low { background: rgba(16, 185, 129, 0.08); border: 1px solid rgba(16, 185, 129, 0.2); color: #047857; }
+.urgency-banner.urgency-moderate { background: rgba(245, 158, 11, 0.08); border: 1px solid rgba(245, 158, 11, 0.25); color: #92700f; }
+.urgency-banner.urgency-high, .urgency-banner.urgency-critical { background: rgba(220, 38, 38, 0.08); border: 1px solid rgba(220, 38, 38, 0.25); color: #991b1b; }
+
 .timeline { position: relative; padding-left: 24px; }
 .timeline::before { content: ''; position: absolute; left: 7px; top: 8px; bottom: 8px; width: 2px; background: var(--border-color); }
 .timeline-item { position: relative; padding-bottom: 20px; padding-left: 20px; }
@@ -2439,3 +2446,9 @@ body {
 .flex { display: flex; }
 .items-center { align-items: center; }
 .justify-between { justify-content: space-between; }
+
+/* Lucide icon alignment inside buttons/badges */
+button svg, .badge-abnormal svg, .secure-badge svg, .sparkle svg, .red-flag-icon svg {
+  flex-shrink: 0;
+  vertical-align: middle;
+}

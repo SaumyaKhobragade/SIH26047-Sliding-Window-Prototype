@@ -120,6 +120,8 @@ class ClinicalSummary(BaseModel):
     patient_id: str
     chief_complaint: str
     hpi: str
+    ai_summary: Optional[str] = None
+    urgency: Optional[Dict[str, Any]] = None
     past_medical_history: List[str]
     current_medications: List[str]
     allergies: List[str]
@@ -410,6 +412,7 @@ async def generate_readback(patient_id: str, session_id: str):
     readback = await summary_generator.generate_readback(
         clinical_fields=session.clinical_fields_collected,
         style_mode=session.current_style,
+        red_flags=session.red_flags_detected,
     )
 
     # Generate TTS audio

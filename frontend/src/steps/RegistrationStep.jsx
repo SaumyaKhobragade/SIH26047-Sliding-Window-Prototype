@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
+import { Link2, Check, Sparkles, CornerDownLeft, User, Cake, VenusAndMars, Phone, ArrowUp, Mic, Bot, Globe, ThumbsUp, ThumbsDown, ScanFace } from 'lucide-react'
 
 const REGISTRATION_STEPS = [
   { id: 'name', field: 'name', prompt: 'Aapka poora naam bataiye.', promptEn: 'Please tell me your full name.', touchLabel: 'Type your name', type: 'text' },
@@ -326,7 +327,7 @@ export default function RegistrationStep({ onComplete, onFlowStateChange }) {
                   </div>
                   {faceState === 'captured' && (
                     <div className="face-matched-badge">
-                      {returningPatient ? '🔗 Matched' : '✓ Captured'}
+                      {returningPatient ? <><Link2 size={14} /> Matched</> : <><Check size={14} /> Captured</>}
                     </div>
                   )}
                 </div>
@@ -339,7 +340,7 @@ export default function RegistrationStep({ onComplete, onFlowStateChange }) {
               {/* Actions */}
               <div className="scan-actions">
                 <p className="scan-note">
-                  <span>✦</span>
+                  <Sparkles size={14} />
                   We'll only use this to find your care records.
                 </p>
 
@@ -350,7 +351,7 @@ export default function RegistrationStep({ onComplete, onFlowStateChange }) {
                   </div>
                 ) : (
                   <button className="capture-button" onClick={() => { if (!hasCapturedRef.current) captureAndIdentify() }}>
-                    <span className="capture-icon" /> Capture <kbd>↵</kbd>
+                    <ScanFace size={18} /> Capture <kbd><CornerDownLeft size={12} /></kbd>
                   </button>
                 )}
 
@@ -473,7 +474,7 @@ export default function RegistrationStep({ onComplete, onFlowStateChange }) {
                     setTouchInput(''); setEditField(null)
                     speakPrompt('Updated! Kya ab sab sahi hai?')
                   }
-                }}>✓</button>
+                }}><Check size={16} /></button>
               </div>
             )}
 
@@ -583,10 +584,10 @@ function NewRegView({ step, currentStep, totalSteps, isSpeaking, isListening, li
           {/* Collected info pills */}
           {(form.name || form.age || form.gender || form.phone) && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, padding: '4px 0' }}>
-              {form.name && <span className="info-pill">👤 {form.name}</span>}
-              {form.age && <span className="info-pill">🎂 {form.age}y</span>}
-              {form.gender && <span className="info-pill">⚧ {form.gender}</span>}
-              {form.phone && <span className="info-pill">📞 {form.phone}</span>}
+              {form.name && <span className="info-pill"><User size={13} /> {form.name}</span>}
+              {form.age && <span className="info-pill"><Cake size={13} /> {form.age}y</span>}
+              {form.gender && <span className="info-pill"><VenusAndMars size={13} /> {form.gender}</span>}
+              {form.phone && <span className="info-pill"><Phone size={13} /> {form.phone}</span>}
             </div>
           )}
           <div className="message system">
@@ -684,7 +685,7 @@ function ConsentView({ isSpeaking, isListening, liveTranscript, form, onConfirm,
           {form.age && <span className="info-pill">🎂 {form.age}y</span>}
           {form.gender && <span className="info-pill">⚧ {form.gender}</span>}
           {form.phone && <span className="info-pill">📞 {form.phone}</span>}
-          {form.language && <span className="info-pill">🌐 {form.language}</span>}
+              {form.language && <span className="info-pill"><Globe size={13} /> {form.language}</span>}
         </div>
 
         <div style={{ display: 'flex', gap: 10 }}>
