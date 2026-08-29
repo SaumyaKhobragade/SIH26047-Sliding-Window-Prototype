@@ -167,6 +167,11 @@ export default function DoctorReportStep({
 
   return (
     <>
+      <div className="print-header">
+        <Stethoscope />
+        <h1>Sliding Window Hospital</h1>
+      </div>
+
       <div className="completion-head">
         <div>
           <span className="eyebrow">READY FOR YOUR DOCTOR</span>

@@ -2452,3 +2452,53 @@ button svg, .badge-abnormal svg, .secure-badge svg, .sparkle svg, .red-flag-icon
   flex-shrink: 0;
   vertical-align: middle;
 }
+
+
+/* --- PRINT LAYOUT --- */
+@media print {
+  body {
+    background: white;
+  }
+  .app-header, .journey, .toast, .offline-banner, .action-bar, .report-tabs, button {
+    display: none !important;
+  }
+  .main-content, .screen-stage, .screen, .doctor-report-step {
+    padding: 0 !important;
+    margin: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    overflow: visible !important;
+    height: auto !important;
+    width: 100% !important;
+  }
+  .print-header {
+    display: flex !important;
+    align-items: center;
+    gap: 12px;
+    border-bottom: 2px solid #000;
+    padding-bottom: 12px;
+    margin-bottom: 24px;
+  }
+  .print-header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    margin: 0;
+    color: #000;
+  }
+  .print-header svg {
+    width: 32px;
+    height: 32px;
+    color: #000;
+  }
+  /* Force dark mode colors to light mode for printing */
+  .doctor-report-step {
+    color: #000 !important;
+  }
+  .rep-section {
+    page-break-inside: avoid;
+    background: transparent !important;
+    border: 1px solid #ccc !important;
+  }
+}
+
+.print-header { display: none; }

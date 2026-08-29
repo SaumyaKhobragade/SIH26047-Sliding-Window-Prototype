@@ -271,14 +271,14 @@ export default function App() {
   }
 
   return (
-    <div className="app-shell">
+<div className="app-shell">
       <div className="bg-mesh" />
 
       {/* Topbar */}
       <header className="topbar">
-        <a className="brand" href="#" aria-label="Aarogya home">
+        <a href="/" className="brand" aria-label="Aarogya home">
           <span className="brand-mark"><i /><i /><i /></span>
-          <span>Aarogya</span>
+          <span>MediKiosk</span>
         </a>
 
         <div className="encounter-info">
