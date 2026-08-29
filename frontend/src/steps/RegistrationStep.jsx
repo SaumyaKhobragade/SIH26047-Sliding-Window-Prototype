@@ -30,12 +30,16 @@ export default function RegistrationStep({ onComplete }) {
 
   const step = flowState === 'new_reg' ? REGISTRATION_STEPS[currentStep] : null
 
+  const captureTimerRef = useRef(null)
+  const hasCapturedRef = useRef(false)
+
   // Auto-start camera on mount
   useEffect(() => {
     startCamera()
     return () => {
       if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())
       if (recognitionRef.current) recognitionRef.current.abort()
+      if (captureTimerRef.current) clearTimeout(captureTimerRef.current)
     }
   }, [])
 
@@ -51,15 +55,20 @@ export default function RegistrationStep({ onComplete }) {
       }
       setFaceState('capturing')
       // Auto-capture after 2.5s
-      setTimeout(() => captureAndIdentify(), 2500)
+      captureTimerRef.current = setTimeout(() => captureAndIdentify(), 2500)
     } catch {
       setFaceState('captured')
-      speakPrompt('Camera not available. Chaliye registration shuru karte hain.')
-      setFlowState('new_reg')
+      if (!hasCapturedRef.current) {
+        hasCapturedRef.current = true
+        speakPrompt('Camera not available. Chaliye registration shuru karte hain. Aapka poora naam bataiye.')
+        setFlowState('new_reg')
+      }
     }
   }
 
   const captureAndIdentify = async () => {
+    if (hasCapturedRef.current) return
+    hasCapturedRef.current = true
     // Capture photo
     if (videoRef.current && canvasRef.current) {
       const ctx = canvasRef.current.getContext('2d')
