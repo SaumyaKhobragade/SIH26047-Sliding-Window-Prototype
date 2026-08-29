@@ -86,7 +86,7 @@ class VoiceService:
             # Cleanup
             os.unlink(tmp_path)
 
-            transcript = response.transcript
+            transcript = response.transcript if response.transcript else ""
             if not transcript:
                 logger.warning("[VOICE] Empty transcript received")
                 return ""
@@ -123,7 +123,7 @@ class VoiceService:
                     text=text,
                     model=settings.SARVAM_TTS_MODEL,
                     language_code=lang_code,
-                    speaker="priya",  # Female voice
+                    speaker=settings.SARVAM_TTS_SPEAKER,  # Female voice
                     pace=1.0,
                 )
 

@@ -26,8 +26,9 @@ class Settings:
 
     # ── Sarvam AI ─────────────────────────────────────────────────────────
     SARVAM_API_KEY: str = os.getenv("SARVAM_API_KEY", "")
-    SARVAM_STT_MODEL: str = "saaras:v3"
+    SARVAM_STT_MODEL: str = os.getenv("SARVAM_STT_MODEL", "saaras:v3")
     SARVAM_TTS_MODEL: str = "bulbul:v3"
+    SARVAM_TTS_SPEAKER: str = os.getenv("SARVAM_TTS_SPEAKER", "ishita")
 
     # ── Face Recognition ──────────────────────────────────────────────────
     FACE_MATCH_THRESHOLD: float = float(os.getenv("FACE_MATCH_THRESHOLD", "0.6"))
