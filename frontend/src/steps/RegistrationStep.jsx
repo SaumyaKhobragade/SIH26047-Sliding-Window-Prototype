@@ -113,7 +113,6 @@ export default function RegistrationStep({ onComplete }) {
 
   // Track current audio to stop overlapping voices
   const currentAudioRef = useRef(null)
-  const hasSpokenFirstRef = useRef(false)
 
   const speakPrompt = async (text) => {
     // Stop any currently playing audio first
@@ -149,16 +148,14 @@ export default function RegistrationStep({ onComplete }) {
     }
   }
 
-  // Speak current registration step prompt (skip first one — already spoken in welcome)
+  // Speak registration step prompts — only for step 1+ (step 0 is in the welcome message)
+  const prevStepRef = useRef(-1)
   useEffect(() => {
-    if (flowState === 'new_reg' && step) {
-      if (!hasSpokenFirstRef.current) {
-        hasSpokenFirstRef.current = true
-        return // Skip — already spoken as part of the welcome message
-      }
+    if (flowState === 'new_reg' && step && currentStep > 0 && currentStep !== prevStepRef.current) {
+      prevStepRef.current = currentStep
       speakPrompt(step.prompt)
     }
-  }, [currentStep, flowState])
+  }, [currentStep])
 
   const [liveTranscript, setLiveTranscript] = useState('')
   const silenceTimerRef = useRef(null)
