@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    ports:
+      - "8080:8080"
+    volumes:
+      # Map data folder so JSON files persist across container restarts
+      - ./backend/data:/app/data
+      # Map the env file if they have one
+      - ./backend/.env:/app/.env
+    environment:
+      - HOST=0.0.0.0
+      - PORT=8080
+      # Can also provide keys explicitly here if needed
+      # - GROQ_API_KEY=your_key
+      # - SARVAM_API_KEY=your_key
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      # Map the source code for hot-reloading in development
+      - ./frontend/src:/app/src
+    environment:
+      - VITE_API_URL=http://localhost:8080
+    depends_on:
+      - backend
