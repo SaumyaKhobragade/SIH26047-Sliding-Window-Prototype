@@ -507,14 +507,16 @@ export default function RegistrationStep({ onComplete, onFlowStateChange }) {
       setCurrentStep(prev => prev + 1)
     } else {
       setFlowState('consent')
-      // The language question is the last step, so read consent in the language
-      // the patient just chose rather than in the default.
-      setForm(f => {
-        speakPrompt(GREETING.consent[f.language] || GREETING.consent.hinglish, f.language)
-        return f
-      })
     }
   }
+
+  // Speak consent prompt safely outside of state updaters
+  useEffect(() => {
+    if (flowState === 'consent') {
+      const lang = languageRef.current || 'hinglish'
+      speakPrompt(GREETING.consent[lang] || GREETING.consent.hinglish, lang)
+    }
+  }, [flowState])
 
   const confirmAndProceed = async () => {
     if (streamRef.current) streamRef.current.getTracks().forEach(t => t.stop())

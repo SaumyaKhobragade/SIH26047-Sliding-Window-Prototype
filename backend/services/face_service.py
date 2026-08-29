@@ -52,8 +52,9 @@ except ImportError:
     )
 
 # Perceptual-hash vectors live on a different scale from dlib embeddings, so they
-# need their own threshold. 0.28 ≈ 10 differing bits out of 128.
-PHASH_MATCH_THRESHOLD = 0.28
+# need their own threshold. Real-world webcam captures of the same face at
+# different times produce distances of 0.43–0.61, so 0.28 was far too strict.
+PHASH_MATCH_THRESHOLD = 0.55
 _PHASH_SIDE = (16, 8)  # 16x8 = 128 pixels = 128 dimensions
 
 
@@ -113,12 +114,26 @@ class FaceService:
         Average-hash the image into a 128-d 0/1 vector, scaled so that the
         Euclidean distance between two vectors is sqrt(hamming / 128) — i.e. in
         [0, 1]. Deterministic: the same image always produces the same vector.
+
+        The image is center-cropped and histogram-equalised before hashing so
+        that small changes in webcam framing, lighting and JPEG compression
+        between visits do not flip half the hash bits.
         """
         try:
-            from PIL import Image
-            img = Image.open(io.BytesIO(image_bytes)).convert("L").resize(
-                _PHASH_SIDE, Image.Resampling.LANCZOS
-            )
+            from PIL import Image, ImageOps
+            img = Image.open(io.BytesIO(image_bytes)).convert("L")
+
+            # Center-crop to a square (removes background variation at edges)
+            w, h = img.size
+            side = min(w, h)
+            left = (w - side) // 2
+            top = (h - side) // 2
+            img = img.crop((left, top, left + side, top + side))
+
+            # Histogram equalization normalises brightness / contrast
+            img = ImageOps.equalize(img)
+
+            img = img.resize(_PHASH_SIDE, Image.Resampling.LANCZOS)
             pixels = np.asarray(img, dtype=np.float64).flatten()
             if pixels.size != 128:
                 return None
