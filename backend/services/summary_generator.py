@@ -9,14 +9,114 @@ Output format matches SIH26047 PS requirements:
   Family → Personal → ROS → Investigations → Red Flags → When to Seek Help
 
 Also generates patient-facing readback text in the conversation style.
+
+Honesty rules enforced here
+---------------------------
+A report that confidently states "no known allergies" for a question that was
+never asked is worse than one that says "not assessed". Every section therefore
+distinguishes three states: collected-positive, collected-negative, and
+NOT COLLECTED. `missing_fields` lists exactly what the interview did not capture.
 """
 
 import logging
+import re
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from services.llm_client import llm_complete
 
 logger = logging.getLogger(__name__)
+
+NOT_ASSESSED = "Not assessed during kiosk intake"
+
+# ── Clinical de-duplication ───────────────────────────────────────────────────
+# The same drug and the same condition arrive from two places: the patient's own
+# answer and the scanned prescription. Comparing whole strings let both through,
+# so the report listed "Metformin 500mg BD" AND "Metformin 500mg - Twice daily
+# (after meals)" — a doctor scanning that list counts four medicines where there
+# are two, and double-counts the dose. Identity is drug + strength, not wording.
+
+_MED_NOISE_WORDS = {
+    "tab", "tabs", "tablet", "tablets", "cap", "caps", "capsule", "capsules",
+    "syp", "syrup", "inj", "injection", "susp", "drops", "oint", "cream",
+}
+_MED_STRENGTH = re.compile(
+    r"(\d+(?:\.\d+)?)\s*(mg|mcg|g|gm|ml|iu|units?|%)", re.IGNORECASE
+)
+
+# Split a compound answer ("Diabetes and Hypertension") into atomic conditions.
+_COND_SPLIT = re.compile(r",|;|/|\+|\band\b|\baur\b", re.IGNORECASE)
+# Qualifiers that change the wording but not the identity of the condition.
+_COND_NOISE = re.compile(
+    r"\b(essential|primary|secondary|chronic|known|old|controlled|uncontrolled|"
+    r"type\s*[12]|mellitus|disease|disorder|history\s+of|h/?o)\b",
+    re.IGNORECASE,
+)
+_COND_SYNONYM = {
+    "dm": "diabetes", "t2dm": "diabetes", "t1dm": "diabetes", "sugar": "diabetes",
+    "shugar": "diabetes", "diabetic": "diabetes",
+    "htn": "hypertension", "bp": "hypertension", "high bp": "hypertension",
+    "high blood pressure": "hypertension", "hypertensive": "hypertension",
+    "cad": "coronary artery", "ihd": "coronary artery",
+    "mi": "myocardial infarction", "heart attack": "myocardial infarction",
+    "tb": "tuberculosis", "asthmatic": "asthma", "thyroid": "thyroid",
+    "hypothyroid": "thyroid", "hypothyroidism": "thyroid",
+}
+
+
+def _med_key(label: str) -> str:
+    """Identity of a medication line: first non-noise word + normalized strength."""
+    low = (label or "").lower()
+    name = next(
+        (w for w in re.findall(r"[a-z]{3,}", low) if w not in _MED_NOISE_WORDS), ""
+    )
+    if not name:
+        return " ".join(low.split())
+    match = _MED_STRENGTH.search(low)
+    strength = ""
+    if match:
+        unit = match.group(2).lower().rstrip("s")
+        strength = f"{float(match.group(1)):g}{'gm' if unit == 'g' else unit}"
+    return f"{name}|{strength}"
+
+
+def _condition_key(text: str) -> str:
+    """Identity of a condition: 'Type 2 Diabetes Mellitus' == 'Diabetes'."""
+    stripped = _COND_NOISE.sub(" ", (text or "").lower())
+    stripped = " ".join(re.sub(r"[^a-z\s]", " ", stripped).split())
+    return _COND_SYNONYM.get(stripped, stripped)
+
+
+def _dedupe_richest(items: List[str], key_fn) -> List[str]:
+    """
+    Collapse items that share an identity, keeping the most informative wording
+    ('Metformin 500mg - Twice daily after meals' over 'Metformin 500mg BD').
+    Insertion order is preserved so patient-reported entries stay first.
+    """
+    best: Dict[str, str] = {}
+    order: List[str] = []
+    for item in items:
+        text = " ".join((item or "").split()).strip(" -,;")
+        if not text:
+            continue
+        key = key_fn(text)
+        if not key:
+            key = text.lower()
+        if key not in best:
+            best[key] = text
+            order.append(key)
+        elif len(text) > len(best[key]):
+            best[key] = text
+    return [best[k] for k in order]
+
+
+# All clinical fields the interview is expected to fill. Kept here (rather than
+# imported) so the summary can be generated from a partial/legacy session dict.
+EXPECTED_FIELDS = [
+    "chief_complaint", "onset", "character", "radiation", "associated_symptoms",
+    "timing", "exacerbating", "severity", "past_medical", "medications",
+    "allergies", "family_history", "personal_history",
+]
 
 
 # ── "When to Seek Immediate Help" templates (PS requirement) ──────────────────
@@ -31,6 +131,38 @@ SEEK_HELP_TEMPLATES = {
         "Fainting or loss of consciousness",
         "→ Call 108 (Ambulance) or go to nearest Emergency Department immediately",
     ],
+    "headache": [
+        "Sudden, severe headache described as the worst ever experienced",
+        "Headache with fever and neck stiffness",
+        "Headache with vomiting, blurred vision, or confusion",
+        "Weakness, numbness, or difficulty speaking",
+        "Headache following a head injury",
+        "→ Call 108 (Ambulance) or go to nearest Emergency Department immediately",
+    ],
+    "abdominal_pain": [
+        "Pain becoming severe, constant, or localised to one spot",
+        "Vomiting blood, or black/tarry stools",
+        "Abdomen becoming hard, swollen, or tender to touch",
+        "High fever with chills",
+        "Inability to pass urine or stool",
+        "→ Visit the nearest hospital Emergency Department or call 108",
+    ],
+    "breathlessness": [
+        "Breathlessness at rest or while speaking",
+        "Bluish discolouration of lips or fingertips",
+        "Chest tightness or pain with breathlessness",
+        "Unable to lie flat or waking at night gasping",
+        "Confusion or drowsiness",
+        "→ Call 108 (Ambulance) immediately",
+    ],
+    "fever": [
+        "Fever above 103°F (39.4°C) or lasting more than 3 days",
+        "Fever with rash, severe headache, or neck stiffness",
+        "Fever with breathlessness or chest pain",
+        "Persistent vomiting or inability to keep fluids down",
+        "Drowsiness, confusion, or seizures",
+        "→ Visit the nearest hospital Emergency Department or call 108",
+    ],
     "default": [
         "Symptoms worsening despite medication",
         "New symptoms appearing (fever, severe pain, bleeding)",
@@ -40,6 +172,49 @@ SEEK_HELP_TEMPLATES = {
         "→ Visit your nearest hospital Emergency Department or call 108",
     ],
 }
+
+# Keyword → template. Checked in order, first match wins.
+_HELP_ROUTES = [
+    ("chest_pain", ("chest", "heart", "cardiac", "seene", "sine", "chati", "chhati", "सीने", "छाती")),
+    ("breathlessness", ("breathless", "breathing", "dyspnoea", "dyspnea", "saans", "sans", "सांस")),
+    ("headache", ("headache", "head pain", "migraine", "sar dard", "sir dard", "सिर")),
+    ("abdominal_pain", ("abdominal", "abdomen", "stomach", "pet ", "पेट")),
+    ("fever", ("fever", "bukhar", "बुखार", "pyrexia")),
+]
+
+# Negation detection with word boundaries. `"no" in text` matched "Nortriptyline"
+# and "unknown", so a patient WITH an allergy could be reported as NKDA.
+_NEGATIVE = re.compile(
+    r"\b(no|none|nil|not|never|negative|denies|denied|nkda|nahi|nahin|"
+    r"koi\s+nahi|kuch\s+nahi)\b|कोई\s*नहीं|कुछ\s*नहीं|नहीं",
+    re.IGNORECASE,
+)
+# "No known allergies" is a negation; "No relief with rest" is not — it is a
+# clinical finding. Only treat a value as negative when the negation is the
+# whole point of the answer (short phrase, no other clinical content).
+_POSITIVE_OVERRIDES = re.compile(
+    r"\b(but|except|however|apart from|other than|allergic|reaction|rash)\b", re.IGNORECASE
+)
+
+
+def _is_collected(value: Optional[str]) -> bool:
+    """True when the interview actually captured something for this field."""
+    return bool(value and value.strip() and value.strip().lower() not in (
+        "not specified", "not assessed", "unknown", "n/a", "-",
+    ))
+
+
+def _is_negative(value: Optional[str]) -> bool:
+    """True when a collected answer means 'nothing to report'."""
+    if not _is_collected(value):
+        return False
+    text = value.strip()
+    if _POSITIVE_OVERRIDES.search(text):
+        return False
+    if not _NEGATIVE.search(text):
+        return False
+    # A long answer that merely contains a negation still carries information.
+    return len(text.split()) <= 6
 
 
 class SummaryGenerator:
@@ -52,19 +227,23 @@ class SummaryGenerator:
         red_flags: List[str],
         scanned_documents: List[Dict[str, Any]],
         past_history: Dict[str, Any],
+        raw_answers: Optional[Dict[str, str]] = None,
+        normalization_source: Optional[Dict[str, str]] = None,
+        interview_complete: bool = True,
     ) -> Dict[str, Any]:
         """
         Generate the complete structured clinical summary.
 
-        In production, this would use an LLM to synthesize natural language.
-        For prototype, we structure the collected fields directly.
+        `normalization_source` marks which fields could not be normalized to
+        English (source == "verbatim"); those are surfaced as
+        `unverified_fields` so the doctor knows to re-read them.
         """
+        clinical_fields = clinical_fields or {}
+        raw_answers = raw_answers or {}
+        normalization_source = normalization_source or {}
+
         # Determine chief complaint category for "when to seek help"
-        cc = clinical_fields.get("chief_complaint", "").lower()
-        if "chest" in cc or "heart" in cc or "seene" in cc or "chati" in cc:
-            help_template = SEEK_HELP_TEMPLATES["chest_pain"]
-        else:
-            help_template = SEEK_HELP_TEMPLATES["default"]
+        help_template = self._route_seek_help(clinical_fields, red_flags)
 
         # Build HPI narrative from SOCRATES fields
         hpi = self._build_hpi(clinical_fields)
@@ -75,14 +254,11 @@ class SummaryGenerator:
         # Build chronological timeline
         timeline = self._build_timeline(scanned_documents, past_history, clinical_fields)
 
-        # Compile lab values from scanned documents
-        lab_values = []
-        for doc in scanned_documents:
-            for lab in doc.get("lab_values", []):
-                lab_values.append(lab)
+        # Compile lab values from scanned documents, flagging abnormal results
+        lab_values = self._compile_investigations(scanned_documents)
 
         # Generate AI clinical summary using LLM
-        ai_summary = await self._synthesize_ai_summary(
+        ai_summary, ai_source = await self._synthesize_ai_summary(
             clinical_fields=clinical_fields,
             hpi=hpi,
             red_flags=red_flags,
@@ -92,35 +268,74 @@ class SummaryGenerator:
         # Text analysis → derived urgency signal for the doctor
         urgency = self._assess_urgency(clinical_fields, red_flags)
 
-        # Build summary
+        missing = [f for f in EXPECTED_FIELDS if not _is_collected(clinical_fields.get(f))]
+        unverified = [
+            f for f, src in normalization_source.items()
+            if src == "verbatim" and _is_collected(clinical_fields.get(f))
+        ]
+
         summary = {
             "patient_id": patient_id,
-            "chief_complaint": clinical_fields.get("chief_complaint", "Not specified"),
+            "chief_complaint": (
+                clinical_fields.get("chief_complaint")
+                if _is_collected(clinical_fields.get("chief_complaint"))
+                else "Not specified"
+            ),
             "hpi": hpi,
             "ai_summary": ai_summary,
+            "ai_summary_source": ai_source,
             "urgency": urgency,
             "past_medical_history": self._get_past_medical(clinical_fields, past_history),
             "current_medications": current_meds,
             "allergies": self._get_allergies(clinical_fields),
             "family_history": self._get_family_history(clinical_fields),
-            "personal_history": clinical_fields.get("personal_history", "Not assessed"),
+            "personal_history": self._get_personal_history(clinical_fields),
             "review_of_systems": self._get_ros(clinical_fields),
             "investigations_summary": lab_values,
             "red_flags": red_flags,
             "when_to_seek_help": help_template,
-            "rag_enriched": past_history.get("found", False),
-            "past_visits": past_history.get("timeline", []),
+            "rag_enriched": bool(past_history.get("found", False)),
+            "past_visits": [
+                # Only real kiosk visits. This was the whole timeline, so a
+                # prescription scanned minutes ago counted as a "past visit".
+                e for e in (past_history.get("timeline") or [])
+                if e.get("type") == "visit"
+            ],
             "timeline": timeline,
+            "interview_complete": interview_complete,
+            "fields_collected": len(EXPECTED_FIELDS) - len(missing),
+            "fields_total": len(EXPECTED_FIELDS),
+            "missing_fields": missing,
+            "unverified_fields": unverified,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
         }
 
         logger.info(
-            "[SUMMARY] Generated for %s. RAG enriched: %s. Red flags: %d",
-            patient_id,
-            summary["rag_enriched"],
-            len(red_flags),
+            "[SUMMARY] Generated for %s. Fields %d/%d, RAG enriched: %s, "
+            "red flags: %d, AI summary: %s%s",
+            patient_id, summary["fields_collected"], summary["fields_total"],
+            summary["rag_enriched"], len(red_flags), ai_source,
+            f", unverified: {unverified}" if unverified else "",
         )
+        if missing:
+            logger.warning("[SUMMARY] %s missing fields: %s", patient_id, ", ".join(missing))
 
         return summary
+
+    @staticmethod
+    def _route_seek_help(fields: Dict[str, str], red_flags: List[str]) -> List[str]:
+        """Pick the pre-validated 'when to seek help' list for this complaint."""
+        haystack = " ".join([
+            (fields.get("chief_complaint") or ""),
+            (fields.get("associated_symptoms") or ""),
+            " ".join(red_flags or []),
+        ]).lower()
+        for key, keywords in _HELP_ROUTES:
+            if any(kw in haystack for kw in keywords):
+                return SEEK_HELP_TEMPLATES[key]
+        return SEEK_HELP_TEMPLATES["default"]
+
+    # ── Patient Readback ───────────────────────────────────────────────────
 
     async def generate_readback(
         self,
@@ -131,61 +346,76 @@ class SummaryGenerator:
         """
         Generate patient-facing readback text in the conversation style.
         PS Requirement: "patient-facing audio confirmation in local language".
-        Data-driven: builds from the real collected fields. Falls back to a
-        data-driven template if the LLM is unavailable.
+
+        Only reads back what was actually collected. It used to default
+        medications to "no regular medicines" and allergies to "no allergies",
+        so a patient who was never asked heard the kiosk assert, in their own
+        language, that they take nothing and are allergic to nothing — and then
+        confirm it.
         """
         red_flags = red_flags or []
-        f = clinical_fields
-        cc = f.get("chief_complaint", "your symptoms")
-        onset = f.get("onset", "")
-        character = f.get("character", "")
-        severity = f.get("severity", "")
-        meds = f.get("medications", "no regular medicines")
-        allergies = f.get("allergies", "no allergies")
-        associated = f.get("associated_symptoms", "")
+        f = clinical_fields or {}
 
-        # Build a fuller data-driven readback using every collected field.
-        detail = ""
+        cc = f.get("chief_complaint") if _is_collected(f.get("chief_complaint")) else None
+        onset = f.get("onset") if _is_collected(f.get("onset")) else None
+        character = f.get("character") if _is_collected(f.get("character")) else None
+        severity = f.get("severity") if _is_collected(f.get("severity")) else None
+        associated = f.get("associated_symptoms")
+        meds = f.get("medications") if _is_collected(f.get("medications")) else None
+        allergies = f.get("allergies") if _is_collected(f.get("allergies")) else None
+
         bits = []
         if onset:
-            bits.append(f"shuru {onset}")
+            bits.append(f"shuru {onset}" if style_mode != "english_professional" else f"onset {onset}")
         if character:
-            bits.append(f"type {character}")
+            bits.append(f"type {character}" if style_mode != "english_professional" else f"character {character}")
         if severity:
             bits.append(f"severity {severity}")
-        if associated and "no" not in associated.lower() and "none" not in associated.lower():
-            bits.append(f"saath mein {associated}")
-        if bits:
-            detail = "; ".join(bits)
+        if _is_collected(associated) and not _is_negative(associated):
+            bits.append(
+                f"saath mein {associated}" if style_mode != "english_professional"
+                else f"associated with {associated}"
+            )
+        detail = "; ".join(bits)
 
         if style_mode == "formal_hindi":
-            s = [f"Namaste. Aapne bataya ki aapko {cc}."]
+            s = [f"Namaste. Aapne bataya ki aapko {cc}." if cc else "Namaste. Aapki jaankari le li gayi hai."]
             if detail:
                 s.append(f"Yeh {detail}.")
-            s.append(f"Aap abhi {meds} le rahe hain. Aapko {allergies} ki allergy hai.")
+            if meds:
+                s.append(f"Dawaiyan: {meds}.")
+            if allergies:
+                s.append(f"Allergy: {allergies}.")
             if red_flags:
                 s.append("Kuch lakshanon ko dekh kar turant medical madad lena zaroori hai.")
             s.append("Kya yeh sab kuch sahi hai?")
             return " ".join(s)
-        elif style_mode == "english_professional":
-            s = [f"You reported {cc}."]
+
+        if style_mode == "english_professional":
+            s = [f"You reported {cc}." if cc else "Here is what we recorded."]
             if detail:
                 s.append(f"Details: {detail}.")
-            s.append(f"Your current medications include {meds}. You have allergies to {allergies}.")
+            if meds:
+                s.append(f"Current medications: {meds}.")
+            if allergies:
+                s.append(f"Allergies: {allergies}.")
             if red_flags:
                 s.append("Some findings warrant prompt medical attention.")
             s.append("Is all of this information correct?")
             return " ".join(s)
-        else:
-            # Hinglish casual (default)
-            s = [f"Aapne bataya ki aapko {cc}."]
-            if detail:
-                s.append(f"Details: {detail}.")
-            s.append(f"Aap currently {meds} le rahe hain. Aapko {allergies} se allergy hai.")
-            if red_flags:
-                s.append("Kuch cheezein dekh kar jaldi se doctor ke paas jaana zaroori hai.")
-            s.append("Kya yeh sab sahi hai?")
-            return " ".join(s)
+
+        # Hinglish casual (default)
+        s = [f"Aapne bataya ki aapko {cc}." if cc else "Aapki details record ho gayi hain."]
+        if detail:
+            s.append(f"Details: {detail}.")
+        if meds:
+            s.append(f"Medicines: {meds}.")
+        if allergies:
+            s.append(f"Allergy: {allergies}.")
+        if red_flags:
+            s.append("Kuch cheezein dekh kar jaldi se doctor ke paas jaana zaroori hai.")
+        s.append("Kya yeh sab sahi hai?")
+        return " ".join(s)
 
     # ── LLM Clinical Synthesis ─────────────────────────────────────────────
 
@@ -194,7 +424,8 @@ class SummaryGenerator:
         "Write a concise 2-3 sentence AI clinical summary for the attending doctor. "
         "Tone: professional, third-person, present-tense medical English. "
         "Include: chief complaint, key SOCRATES findings, relevant history, "
-        "and any red flags. Do NOT suggest diagnoses. "
+        "and any red flags. Do NOT suggest diagnoses. Do NOT invent findings that "
+        "are not in the data. "
         "Max 80 words. Output plain text only — no bullet points, no headings."
     )
 
@@ -204,84 +435,104 @@ class SummaryGenerator:
         hpi: str,
         red_flags: List[str],
         past_history: Dict[str, Any],
-    ) -> str:
+    ) -> tuple[str, str]:
         """
         Call LLM to synthesize a doctor-grade AI clinical summary.
-        Falls back to a structured template if LLM unavailable.
+        Returns (text, source) where source is "llm" or "template" — the report
+        used to give no indication that the LLM had failed and the paragraph was
+        a canned string.
         """
         chronic = past_history.get("chronic_conditions", [])
-        past_meds = past_history.get("past_medications", [])
 
         prompt_parts = [
-            f"Chief Complaint: {clinical_fields.get('chief_complaint', 'Not specified')}",
+            f"Chief Complaint: {clinical_fields.get('chief_complaint') or 'Not specified'}",
             f"HPI: {hpi}",
         ]
-        if clinical_fields.get("past_medical"):
+        if _is_collected(clinical_fields.get("past_medical")):
             prompt_parts.append(f"Past Medical History: {clinical_fields['past_medical']}")
         if chronic:
             prompt_parts.append(f"Known Chronic Conditions: {', '.join(chronic)}")
-        if clinical_fields.get("medications"):
+        if _is_collected(clinical_fields.get("medications")):
             prompt_parts.append(f"Current Medications: {clinical_fields['medications']}")
-        if clinical_fields.get("allergies"):
+        if _is_collected(clinical_fields.get("allergies")):
             prompt_parts.append(f"Allergies: {clinical_fields['allergies']}")
+        if _is_collected(clinical_fields.get("personal_history")):
+            prompt_parts.append(f"Personal/Social History: {clinical_fields['personal_history']}")
         if red_flags:
             prompt_parts.append(f"Red Flags Detected: {'; '.join(red_flags)}")
 
         prompt = "Clinical data:\n" + "\n".join(prompt_parts) + "\n\nAI clinical summary:"
 
-        result = await llm_complete(prompt, system=self._AI_SUMMARY_SYSTEM, max_tokens=120)
-        result = result.strip()
+        # 120 tokens was below the floor reasoning models need before emitting
+        # any content — this call returned "" on every request.
+        result = (await llm_complete(prompt, system=self._AI_SUMMARY_SYSTEM, max_tokens=400)).strip()
 
-        if not result or len(result) < 20:
-            # Fallback template if LLM unavailable
-            cc = clinical_fields.get("chief_complaint", "unspecified complaint")
-            flag_note = (
-                " Red flags noted — timely clinical review advised."
-                if red_flags else
-                " No acute red flags identified at intake."
-            )
-            result = (
-                f"Patient presents with {cc}. "
-                f"SOCRATES assessment completed via AI-assisted kiosk intake.{flag_note}"
-            )
+        if result and len(result) >= 20:
+            logger.info("[SUMMARY] AI clinical summary from LLM (%d chars)", len(result))
+            return result, "llm"
 
-        logger.info("[SUMMARY] AI clinical summary generated (%d chars)", len(result))
-        return result
+        cc = clinical_fields.get("chief_complaint") or "an unspecified complaint"
+        flag_note = (
+            " Red flags noted — timely clinical review advised."
+            if red_flags else
+            " No acute red flags identified at intake."
+        )
+        fallback = (
+            f"Patient presents with {cc}. {hpi} "
+            f"SOCRATES assessment completed via AI-assisted kiosk intake.{flag_note} "
+            "(Narrative synthesis unavailable — structured fields below are authoritative.)"
+        )
+        logger.warning(
+            "[SUMMARY] LLM unavailable — using deterministic template for the AI summary."
+        )
+        return fallback, "template"
+
+    # ── Structured Sections ────────────────────────────────────────────────
 
     @staticmethod
     def _build_hpi(fields: Dict[str, str]) -> str:
         """Build HPI narrative from SOCRATES fields."""
         parts = []
 
-        cc = fields.get("chief_complaint", "")
+        def val(key):
+            v = fields.get(key)
+            return v.strip() if _is_collected(v) else None
+
+        cc = val("chief_complaint")
         if cc:
             parts.append(f"Patient presents with {cc}")
 
-        onset = fields.get("onset", "")
+        onset = val("onset")
         if onset:
             parts.append(f"onset {onset}")
 
-        character = fields.get("character", "")
+        character = val("character")
         if character:
             parts.append(f"described as {character} in nature")
 
-        radiation = fields.get("radiation", "")
-        if radiation and "no" not in radiation.lower():
-            parts.append(f"radiating to {radiation}")
+        radiation = val("radiation")
+        if radiation:
+            if _is_negative(radiation):
+                parts.append("no radiation reported")
+            else:
+                parts.append(f"radiating to {radiation}")
 
-        exacerbating = fields.get("exacerbating", "")
+        exacerbating = val("exacerbating")
         if exacerbating:
-            parts.append(f"aggravated by {exacerbating}")
+            parts.append(f"aggravating/relieving factors: {exacerbating}")
 
-        severity = fields.get("severity", "")
+        severity = val("severity")
         if severity:
             parts.append(f"severity rated {severity}")
 
-        associated = fields.get("associated_symptoms", "")
-        if associated and "none" not in associated.lower():
-            parts.append(f"associated with {associated}")
+        associated = val("associated_symptoms")
+        if associated:
+            if _is_negative(associated):
+                parts.append("no associated symptoms reported")
+            else:
+                parts.append(f"associated with {associated}")
 
-        timing = fields.get("timing", "")
+        timing = val("timing")
         if timing:
             parts.append(f"pattern: {timing}")
 
@@ -293,82 +544,189 @@ class SummaryGenerator:
         documents: List[Dict[str, Any]],
         past_history: Dict[str, Any],
     ) -> List[str]:
-        """Compile unique medications from all sources."""
-        raw_meds = []
-
-        def _normalize(s: str) -> str:
-            """Normalize dashes and whitespace for dedup."""
-            import re
-            s = s.replace("\u2014", " ").replace("\u2013", " ").replace("-", " ")
-            s = re.sub(r'\s+', ' ', s).strip().lower()
-            return s
-
-        seen = set()
+        """Compile unique medications from conversation, OCR and past history."""
+        raw_meds: List[str] = []
 
         def _add(med_str: str):
-            key = _normalize(med_str)
-            if key and key not in seen and "no " not in key:
-                seen.add(key)
-                raw_meds.append(med_str.strip())
+            med_str = " ".join((med_str or "").split()).strip(" -,")
+            if not med_str:
+                return
+            # Do not turn "no regular medications" into a medication entry.
+            if _is_negative(med_str):
+                return
+            raw_meds.append(med_str)
 
-        # From conversation
-        patient_meds = fields.get("medications", "")
-        if patient_meds:
-            for m in patient_meds.replace(" and ", ",").replace(" aur ", ",").split(","):
+        patient_meds = fields.get("medications")
+        if _is_collected(patient_meds) and not _is_negative(patient_meds):
+            for m in re.split(r",|\band\b|\baur\b|;", patient_meds):
                 _add(m)
 
-        # From scanned documents
-        for doc in documents:
+        for doc in documents or []:
             for med in doc.get("medications", []):
-                name = med.get("drug_name", "")
-                strength = med.get("strength", "")
-                freq = med.get("frequency", "")
-                if name:
-                    _add(f"{name} {strength} - {freq}")
+                name = (med.get("drug_name") or med.get("name") or "").strip()
+                if not name:
+                    continue
+                strength = (med.get("strength") or "").strip()
+                freq = (med.get("frequency") or med.get("dosage") or "").strip()
+                label = " ".join(x for x in (name, strength) if x)
+                if freq:
+                    label = f"{label} - {freq}"
+                _add(label)
 
-        # From RAG past history
-        for m in past_history.get("past_medications", []):
+        for m in past_history.get("past_medications", []) or []:
             _add(m)
 
-        return sorted(raw_meds)
+        # Identity is drug + strength, so the patient's "Metformin 500mg BD" and
+        # the prescription's "Metformin 500mg - Twice daily (after meals)"
+        # collapse into one line instead of reading as two prescriptions.
+        deduped = _dedupe_richest(raw_meds, _med_key)
+
+        if not deduped:
+            if _is_negative(fields.get("medications")):
+                return ["No regular medications reported by patient"]
+            return [NOT_ASSESSED]
+
+        return deduped
+
+    @staticmethod
+    def _compile_investigations(documents: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """
+        Flatten lab values from all scanned documents.
+
+        PS gap fix: every row carries an explicit `status` and `is_abnormal` so
+        the doctor's view can highlight out-of-range results instead of the
+        doctor having to compare each value against its reference range by eye.
+        """
+        rows: List[Dict[str, Any]] = []
+        for doc in documents or []:
+            for lab in doc.get("lab_values", []) or []:
+                status = (lab.get("status") or "").strip().lower()
+                if not status:
+                    status = SummaryGenerator._infer_lab_status(
+                        lab.get("value"), lab.get("reference")
+                    )
+                rows.append({
+                    **lab,
+                    "status": status or "unknown",
+                    "is_abnormal": status in ("abnormal", "high", "low", "critical"),
+                    "source_document": doc.get("doctor_name") or doc.get("filename") or "Scanned report",
+                    "document_date": doc.get("date") or doc.get("scanned_on") or "Unknown",
+                })
+        # Abnormal results first — that is what the doctor needs to see.
+        rows.sort(key=lambda r: (not r["is_abnormal"], str(r.get("test", ""))))
+        return rows
+
+    @staticmethod
+    def _infer_lab_status(value: Any, reference: Any) -> str:
+        """
+        Compare a lab value against a textual reference range.
+        Handles '< 7.0%', '> 40', '70-100 mg/dL'. Returns '' when undecidable —
+        guessing on a lab result would be worse than leaving it unmarked.
+        """
+        def _num(text: Any) -> Optional[float]:
+            m = re.search(r"-?\d+(?:\.\d+)?", str(text or ""))
+            return float(m.group()) if m else None
+
+        v = _num(value)
+        ref = str(reference or "").strip()
+        if v is None or not ref:
+            return ""
+
+        m = re.match(r"^[<≤]\s*(-?\d+(?:\.\d+)?)", ref)
+        if m:
+            return "abnormal" if v > float(m.group(1)) else "normal"
+
+        m = re.match(r"^[>≥]\s*(-?\d+(?:\.\d+)?)", ref)
+        if m:
+            return "abnormal" if v < float(m.group(1)) else "normal"
+
+        m = re.match(r"^(-?\d+(?:\.\d+)?)\s*[-–to]+\s*(-?\d+(?:\.\d+)?)", ref)
+        if m:
+            low, high = float(m.group(1)), float(m.group(2))
+            return "normal" if low <= v <= high else "abnormal"
+
+        return ""
 
     @staticmethod
     def _get_past_medical(
         fields: Dict[str, str], past_history: Dict[str, Any]
     ) -> List[str]:
         """Get past medical history from conversation + RAG."""
-        conditions = []
+        raw: List[str] = []
 
-        pm = fields.get("past_medical", "")
-        if pm and "none" not in pm.lower():
-            conditions.append(pm)
+        pm = fields.get("past_medical")
+        if _is_collected(pm) and not _is_negative(pm):
+            # Split compound answers so "Diabetes and Hypertension" can be
+            # matched against the prescription's "Type 2 Diabetes Mellitus,
+            # Essential Hypertension" instead of both being listed in full.
+            raw.extend(_COND_SPLIT.split(pm))
 
-        for c in past_history.get("chronic_conditions", []):
-            if c not in conditions:
-                conditions.append(c)
+        for c in past_history.get("chronic_conditions", []) or []:
+            if c:
+                raw.extend(_COND_SPLIT.split(c))
 
-        return conditions if conditions else ["No significant past medical history reported"]
+        conditions = _dedupe_richest(raw, _condition_key)
+
+        if conditions:
+            return conditions
+        if _is_negative(pm):
+            return ["No significant past medical history reported by patient"]
+        return [NOT_ASSESSED]
 
     @staticmethod
     def _get_allergies(fields: Dict[str, str]) -> List[str]:
-        allergies = fields.get("allergies", "")
-        if allergies and "no" not in allergies.lower() and "none" not in allergies.lower():
-            return [allergies]
-        return ["No known drug allergies (NKDA)"]
+        allergies = fields.get("allergies")
+        if not _is_collected(allergies):
+            # NEVER assert NKDA for a question that was not asked.
+            return [f"{NOT_ASSESSED} — allergy status UNKNOWN, confirm before prescribing"]
+        if _is_negative(allergies):
+            return ["No known drug allergies (NKDA) — patient reported"]
+        return [allergies.strip()]
 
     @staticmethod
     def _get_family_history(fields: Dict[str, str]) -> List[str]:
-        fh = fields.get("family_history", "")
-        if fh and "no" not in fh.lower() and "none" not in fh.lower():
-            return [fh]
-        return ["No significant family history reported"]
+        fh = fields.get("family_history")
+        if not _is_collected(fh):
+            return [NOT_ASSESSED]
+        if _is_negative(fh):
+            return ["No significant family history reported by patient"]
+        return [fh.strip()]
+
+    @staticmethod
+    def _get_personal_history(fields: Dict[str, str]) -> str:
+        ph = fields.get("personal_history")
+        if not _is_collected(ph):
+            return NOT_ASSESSED
+        if _is_negative(ph):
+            return "No tobacco, alcohol or substance use reported"
+        return ph.strip()
 
     @staticmethod
     def _get_ros(fields: Dict[str, str]) -> str:
-        associated = fields.get("associated_symptoms", "")
-        if associated:
-            return f"Positive for: {associated}. Remaining systems not assessed in kiosk intake."
-        return "Not assessed in kiosk intake."
+        """
+        Review of systems, assembled from what the interview actually covered.
+        There is no dedicated ROS question in a kiosk intake, so state the scope
+        explicitly rather than implying a full systemic review was performed.
+        """
+        positives, negatives = [], []
+
+        associated = fields.get("associated_symptoms")
+        if _is_collected(associated):
+            (negatives if _is_negative(associated) else positives).append(associated.strip())
+
+        ph = fields.get("personal_history")
+        if _is_collected(ph) and not _is_negative(ph):
+            positives.append(f"social history: {ph.strip()}")
+
+        parts = []
+        if positives:
+            parts.append("Positive for: " + "; ".join(positives) + ".")
+        if negatives and not positives:
+            parts.append("Patient denies associated systemic symptoms.")
+        if not parts:
+            return NOT_ASSESSED
+        parts.append("Full systemic review not performed in kiosk intake.")
+        return " ".join(parts)
 
     @staticmethod
     def _assess_urgency(
@@ -380,13 +738,13 @@ class SummaryGenerator:
         rule (safety-critical → never free-form LLM), so it's simple and auditable.
         """
         max_severity = 0.0
-        raw_sev = (fields.get("severity", "") or "").lower()
-        # Extract a numeric severity like "7", "7/10", "8 out of 10".
-        import re
-        m = re.search(r"(\d{1,2})", raw_sev)
+        raw_sev = (fields.get("severity") or "").lower()
+        # Prefer an explicit "N/10", else the first 1-2 digit number.
+        m = re.search(r"(\d{1,2})\s*/\s*10", raw_sev) or re.search(r"(\d{1,2})", raw_sev)
         if m:
             max_severity = min(10.0, float(m.group(1)))
 
+        red_flags = red_flags or []
         critical = any("[CRITICAL]" in f for f in red_flags)
         high = any("[HIGH]" in f for f in red_flags)
         count = len(red_flags)
@@ -421,24 +779,31 @@ class SummaryGenerator:
         past_history: Dict[str, Any],
         fields: Dict[str, str],
     ) -> List[Dict[str, Any]]:
-        """Build chronological timeline from all sources."""
-        timeline = []
+        """
+        Build a chronological timeline from all sources.
+        PS gap fix: the current visit is always the last entry, and entries with
+        an unknown date sort to the end instead of crashing the comparison.
+        """
+        timeline: List[Dict[str, Any]] = list(past_history.get("timeline", []) or [])
 
-        # Past visits from RAG
-        for entry in past_history.get("timeline", []):
-            timeline.append(entry)
-
-        # Current visit
-        from datetime import datetime
+        cc = fields.get("chief_complaint")
         timeline.append({
             "date": datetime.now().strftime("%Y-%m-%d"),
             "type": "current_visit",
             "doctor": "MediKiosk AI Intake",
-            "summary": fields.get("chief_complaint", "Current visit"),
+            "summary": cc if _is_collected(cc) else "Current visit",
             "medications": [],
+            "source": "current_visit",
         })
 
-        # Sort by date
-        timeline.sort(key=lambda x: x.get("date", "9999"))
+        def key(entry: Dict[str, Any]) -> tuple:
+            # `x.get("date", "9999")` returned None for entries whose date key
+            # existed but was null, and None < str raises TypeError.
+            value = entry.get("date")
+            if not isinstance(value, str) or not value.strip():
+                return ("9999-12-31", 1)
+            # Current visit last within the same date.
+            return (value.strip(), 1 if entry.get("type") == "current_visit" else 0)
 
+        timeline.sort(key=key)
         return timeline

@@ -42,6 +42,11 @@ export default function App() {
   const [sessionId, setSessionId] = useState(null)
   const [summaryData, setSummaryData] = useState(null)
   const [readbackData, setReadbackData] = useState(null)
+  const [summaryError, setSummaryError] = useState('')
+  // Set when the clinical backend could not be reached. There is no offline
+  // interview script any more — nothing can be collected without the backend —
+  // so this only drives the banner and the conversation step's blocked view.
+  const [offlineMode, setOfflineMode] = useState(false)
 
   // Live clock
   useEffect(() => {
@@ -54,69 +59,93 @@ export default function App() {
     return () => clearInterval(id)
   }, [])
 
+  // Registers the patient if needed, then opens an ACI session. Throws on
+  // failure. Split out of handleRegistrationComplete so ConversationStep's
+  // "Try again" re-runs exactly this, rather than a second, divergent copy.
+  const connectClinicalSession = useCallback(async (data, existingPatientId) => {
+    // /patient/register mints a fresh PT-XXXXXXXX on every call, so it must only
+    // run when there is no id yet. A retry after a registration that succeeded
+    // but whose /aci/start failed would otherwise leave a duplicate patient
+    // record — and file this visit under the wrong one.
+    let pid = existingPatientId || data.patientId || null
+
+    if (pid) {
+      setPatientId(pid)
+      if (data.isReturning) setFaceMatched(true)
+    } else {
+      const formData = new FormData()
+      formData.append('name', data.name)
+      formData.append('age', data.age)
+      formData.append('gender', data.gender)
+      formData.append('phone', data.phone || '')
+      formData.append('abha_id', data.abhaId || '')
+      formData.append('language_preference', data.language || 'hinglish')
+
+      if (data.faceBlob) {
+        formData.append('face_image', data.faceBlob, 'face.jpg')
+      }
+
+      const res = await fetch(`${API}/patient/register`, {
+        method: 'POST',
+        body: formData,
+      })
+
+      if (!res.ok) throw new Error(`Registration failed (${res.status})`)
+      const result = await res.json()
+      pid = result.patient_id
+      setPatientId(pid)
+      setFaceMatched(result.is_returning || false)
+    }
+
+    if (!pid) throw new Error('No patient ID was issued')
+
+    const aciRes = await fetch(
+      `${API}/aci/start?patient_id=${pid}&language=${data.language || 'hinglish'}`,
+      { method: 'POST' }
+    )
+    if (!aciRes.ok) throw new Error(`Could not start interview (${aciRes.status})`)
+    const aciData = await aciRes.json()
+    setSessionId(aciData.session_id)
+    setPatientData(prev => ({
+      ...prev,
+      patientId: pid,
+      sessionId: aciData.session_id,
+      greeting: aciData.greeting,
+      touchOptions: aciData.touch_options,
+      styleMode: aciData.style_mode,
+      field: aciData.field,
+      totalQuestions: aciData.total_questions,
+    }))
+    setOfflineMode(false)
+    return pid
+  }, [])
+
   const handleRegistrationComplete = useCallback(async (data) => {
     setPatientData(data)
+    setOfflineMode(false)
 
     try {
-      let pid = data.patientId || null
-      const isReturning = data.isReturning || false
-
-      if (isReturning && pid) {
-        setPatientId(pid)
-        setFaceMatched(true)
-      } else {
-        const formData = new FormData()
-        formData.append('name', data.name)
-        formData.append('age', data.age)
-        formData.append('gender', data.gender)
-        formData.append('phone', data.phone || '')
-        formData.append('abha_id', data.abhaId || '')
-        formData.append('language_preference', data.language || 'hinglish')
-
-        if (data.faceBlob) {
-          formData.append('face_image', data.faceBlob, 'face.jpg')
-        }
-
-        const res = await fetch(`${API}/patient/register`, {
-          method: 'POST',
-          body: formData,
-        })
-
-        if (res.ok) {
-          const result = await res.json()
-          pid = result.patient_id
-          setPatientId(pid)
-          setFaceMatched(result.is_returning || false)
-        }
-      }
-
-      if (pid) {
-        const aciRes = await fetch(
-          `${API}/aci/start?patient_id=${pid}&language=${data.language || 'hinglish'}`,
-          { method: 'POST' }
-        )
-        if (aciRes.ok) {
-          const aciData = await aciRes.json()
-          setSessionId(aciData.session_id)
-          setPatientData(prev => ({
-            ...prev,
-            patientId: pid,
-            sessionId: aciData.session_id,
-            greeting: aciData.greeting,
-            touchOptions: aciData.touch_options,
-            styleMode: aciData.style_mode,
-          }))
-        }
-      }
+      await connectClinicalSession(data, null)
     } catch (err) {
-      console.warn('Backend unavailable, using mock mode:', err.message)
-      setPatientId('PT-MOCK-' + Date.now())
-      setSessionId('SESS-MOCK-' + Date.now())
-      setFaceMatched(Math.random() > 0.6)
+      // Fabricating PT-MOCK-/SESS-MOCK- ids made ConversationStep believe it had
+      // a session, so every turn was POSTed to one that did not exist; and
+      // setFaceMatched(Math.random() > 0.6) told the doctor a first-time patient
+      // had been recognised 40% of the time. Fail visibly and leave sessionId
+      // null so the interview blocks instead of pretending to run.
+      console.error('Backend unavailable:', err.message)
+      setSessionId(null)
+      setOfflineMode(true)
     }
 
     setCurrentStep(1)
-  }, [])
+  }, [connectClinicalSession])
+
+  // Surfaced as "Try again" on the blocked conversation screen. Rethrows so the
+  // step can show why it is still failing.
+  const handleRetryConnection = useCallback(async () => {
+    if (!patientData) throw new Error('nothing to retry — please re-register.')
+    await connectClinicalSession(patientData, patientId)
+  }, [patientData, patientId, connectClinicalSession])
 
   const handleConversationComplete = useCallback((data) => {
     setConversationData(data)
@@ -125,6 +154,7 @@ export default function App() {
 
   const handlePrescriptionComplete = useCallback(async (data) => {
     setPrescriptionData(data)
+    setSummaryError('')
 
     if (patientId && sessionId) {
       try {
@@ -133,8 +163,12 @@ export default function App() {
           { method: 'POST' }
         )
         if (res.ok) {
-          const summary = await res.json()
-          setSummaryData(summary)
+          setSummaryData(await res.json())
+        } else {
+          // Leaving summaryData null showed an empty report that looked like a
+          // patient with no findings. Say what went wrong instead.
+          const body = await res.text()
+          throw new Error(`Summary generation failed (${res.status}): ${body.slice(0, 200)}`)
         }
 
         const rbRes = await fetch(
@@ -142,12 +176,16 @@ export default function App() {
           { method: 'POST' }
         )
         if (rbRes.ok) {
-          const rb = await rbRes.json()
-          setReadbackData(rb)
+          setReadbackData(await rbRes.json())
         }
       } catch (err) {
-        console.warn('Summary generation failed, using mock:', err.message)
+        console.error('Summary generation failed:', err)
+        setSummaryError(err.message || 'Summary generation failed')
       }
+    } else {
+      setSummaryError(
+        'No clinical session — the backend was unreachable, so no structured summary was generated.'
+      )
     }
 
     setCurrentStep(3)
@@ -167,6 +205,8 @@ export default function App() {
     setSessionId(null)
     setSummaryData(null)
     setReadbackData(null)
+    setSummaryError('')
+    setOfflineMode(false)
     setRegFlowState('scanning')
   }, [])
 
@@ -195,6 +235,7 @@ export default function App() {
             apiBase={API}
             onComplete={handleConversationComplete}
             onBack={handleBack}
+            onRetryConnection={handleRetryConnection}
           />
         )
       case 2:
@@ -216,6 +257,7 @@ export default function App() {
             faceMatched={faceMatched}
             summaryData={summaryData}
             readbackData={readbackData}
+            summaryError={summaryError}
             patientId={patientId}
             sessionId={sessionId}
             apiBase={API}
@@ -294,6 +336,17 @@ export default function App() {
 
         {/* Screen Stage */}
         <section className="screen-stage">
+          {offlineMode && (
+            <div role="alert" style={{
+              margin: '0 0 12px', padding: '10px 16px', fontSize: 13,
+              background: 'rgba(245,158,11,0.1)', border: '1px solid rgba(245,158,11,0.35)',
+              borderRadius: 'var(--radius-md)', color: '#fcd34d',
+            }}>
+              <b>Clinical backend unreachable.</b> The interview, document scanning and the
+              doctor's report all need it, so none of them can run until it is back. Nothing
+              said or scanned in the meantime is recorded.
+            </div>
+          )}
           <article className="screen">
             {renderStep()}
           </article>

@@ -24,11 +24,12 @@ from pydantic import BaseModel, Field
 
 from config import settings
 from services.face_service import FaceService
-from services.aci_engine import ACIEngine
+from services.aci_engine import ACIEngine, CLINICAL_QUESTIONS, TOTAL_QUESTIONS
 from services.summary_generator import SummaryGenerator
-from services.prescription_ocr import PrescriptionOCR
+from services.prescription_ocr import PrescriptionOCR, OCRUnavailable
 from services.rag_service import RAGService
-from services.voice_service import VoiceService
+from services.voice_service import VoiceService, STTUnavailable
+from services import llm_client
 
 logging.basicConfig(
     level=logging.INFO,
@@ -90,10 +91,20 @@ class ConversationResponse(BaseModel):
     session_id: str
     ai_response: str
     style_mode: str
+    # Rolling-window ratios (what the UI language bar should show).
     language_ratios: Dict[str, float]
+    # Ratios for this single turn — useful for the demo overlay.
+    turn_ratios: Dict[str, float] = {}
+    # Field the NEXT question collects.
     field_collected: str
+    # Field this turn just recorded. Frontends were storing the answer under
+    # `field_collected`, which is the next question — an off-by-one.
+    field_stored: str = ""
+    normalized_value: str = ""
     red_flags: List[str]
     progress_pct: int
+    questions_answered: int = 0
+    total_questions: int = 0
     is_complete: bool
     touch_options: List[str]
 
@@ -104,6 +115,8 @@ class SessionStartResponse(BaseModel):
     greeting: str
     touch_options: List[str]
     style_mode: str
+    field: str = ""
+    total_questions: int = 0
 
 
 class PrescriptionResult(BaseModel):
@@ -114,6 +127,12 @@ class PrescriptionResult(BaseModel):
     date: str
     ocr_confidence: float
     corrections: List[Dict[str, str]]
+    # Provenance. Everything above is read off the image the patient uploaded —
+    # there is no sample/mock branch to distinguish any more, so `ocr_source` and
+    # `extraction_source` say WHICH real reader produced it, not whether it is real.
+    ocr_source: str = "unknown"
+    extraction_source: str = "unknown"
+    raw_text: str = ""
 
 
 class ClinicalSummary(BaseModel):
@@ -134,6 +153,15 @@ class ClinicalSummary(BaseModel):
     rag_enriched: bool
     past_visits: List[Dict[str, Any]]
     timeline: List[Dict[str, Any]]
+    # Provenance / quality signals so the doctor can see what is missing rather
+    # than reading a confident-looking report built from absent data.
+    interview_complete: bool = True
+    fields_collected: int = 0
+    fields_total: int = 0
+    missing_fields: List[str] = []
+    unverified_fields: List[str] = []
+    generated_at: str = ""
+    ai_summary_source: str = "template"
 
 
 class ReadbackResponse(BaseModel):
@@ -146,11 +174,37 @@ class ReadbackResponse(BaseModel):
 
 @app.get("/health")
 def health():
+    """
+    Health + configuration diagnostics.
+
+    The LLM block matters: when the configured model name is dead, every
+    llm_complete() returns "" and the clinical pipeline silently degrades to
+    canned templates. `llm.last_error` / `llm.empty_responses` make that visible
+    instead of leaving it to be discovered in the demo.
+    """
+    llm = llm_client.health()
     return {
-        "status": "healthy",
+        "status": "healthy" if llm["api_key_present"] else "degraded",
         "sarvam_configured": bool(settings.SARVAM_API_KEY),
         "llm_provider": settings.LLM_PROVIDER,
+        "llm": llm,
         "face_service": face_service.is_ready(),
+        "clinical_questions": TOTAL_QUESTIONS,
+    }
+
+
+@app.get("/health/llm")
+async def health_llm():
+    """Live round-trip test of the configured LLM. Use before a demo."""
+    from services.llm_client import llm_complete
+
+    reply = await llm_complete(
+        "Reply with exactly: OK", system="You are a test probe.", max_tokens=256
+    )
+    return {
+        "reachable": bool(reply),
+        "reply": reply[:120],
+        **llm_client.health(),
     }
 
 
@@ -244,6 +298,8 @@ async def start_conversation(patient_id: str, language: str = "hinglish"):
         greeting=greeting["text"],
         touch_options=greeting["touch_options"],
         style_mode=session.current_style,
+        field=CLINICAL_QUESTIONS[0]["field"],
+        total_questions=TOTAL_QUESTIONS,
     )
 
 
@@ -253,19 +309,14 @@ async def converse(req: ConversationRequest):
     Main conversation endpoint. Takes patient text (from STT) and returns
     AI response with adaptive language matching.
     """
-    result = await aci_engine.process_turn(req.session_id, req.patient_text)
+    try:
+        result = await aci_engine.process_turn(req.session_id, req.patient_text)
+    except ValueError as e:
+        # Unknown session — a 404 lets the frontend restart cleanly instead of
+        # seeing an opaque 500.
+        raise HTTPException(404, str(e))
 
-    return ConversationResponse(
-        session_id=req.session_id,
-        ai_response=result["ai_response"],
-        style_mode=result["style_mode"],
-        language_ratios=result["language_ratios"],
-        field_collected=result["field_collected"],
-        red_flags=result["red_flags"],
-        progress_pct=result["progress_pct"],
-        is_complete=result["is_complete"],
-        touch_options=result["touch_options"],
-    )
+    return ConversationResponse(session_id=req.session_id, **result)
 
 
 @app.post("/aci/converse-voice")
@@ -273,16 +324,26 @@ async def converse_voice(session_id: str = Form(...), audio: UploadFile = File(.
     """
     Voice-in, voice-out conversation. Full pipeline:
     Audio → Sarvam STT → ACI Engine → Response Text → Sarvam TTS → Audio out
+
+    A recording that cannot be transcribed returns 422. It used to yield a fixed
+    mock sentence about chest pain, which was then normalized and stored as the
+    patient's answer to whichever clinical question happened to be open.
     """
     audio_bytes = await audio.read()
 
     # 1. STT
-    patient_text = await voice_service.speech_to_text(audio_bytes)
+    try:
+        patient_text = await voice_service.speech_to_text(audio_bytes)
+    except STTUnavailable as e:
+        raise HTTPException(422, str(e)) from e
 
     # 2. ACI Engine
-    result = await aci_engine.process_turn(session_id, patient_text)
+    try:
+        result = await aci_engine.process_turn(session_id, patient_text)
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
-    # 3. TTS
+    # 3. TTS — spoken in the style the engine just selected
     response_audio = await voice_service.text_to_speech(
         result["ai_response"],
         result["style_mode"],
@@ -290,15 +351,8 @@ async def converse_voice(session_id: str = Form(...), audio: UploadFile = File(.
 
     return {
         "patient_transcript": patient_text,
-        "ai_response": result["ai_response"],
         "ai_audio_base64": response_audio,
-        "style_mode": result["style_mode"],
-        "language_ratios": result["language_ratios"],
-        "field_collected": result["field_collected"],
-        "red_flags": result["red_flags"],
-        "progress_pct": result["progress_pct"],
-        "is_complete": result["is_complete"],
-        "touch_options": result["touch_options"],
+        **result,
     }
 
 
@@ -322,10 +376,26 @@ async def scan_prescription(
 ):
     """
     Scan a prescription/lab report. Pipeline:
-    Image → Sarvam Vision OCR → LLM Extraction → Drug Fuzzy Matching → Result
+    Image → Sarvam Doc-AI OCR → LLM extraction → drug fuzzy matching → result
+
+    A scan that cannot be read returns 422 with the reason. It used to fall back
+    to a hardcoded example prescription, which put medicines and lab values the
+    patient had never been given into their doctor's report.
     """
     image_bytes = await document.read()
-    result = await prescription_ocr.process_document(patient_id, image_bytes)
+    try:
+        result = await prescription_ocr.process_document(patient_id, image_bytes)
+    except OCRUnavailable as e:
+        raise HTTPException(422, str(e)) from e
+
+    if not result["medications"] and not result["lab_values"]:
+        # The page was read but nothing clinical was recognised. Storing it would
+        # add an empty document to the patient's history and to the timeline.
+        raise HTTPException(
+            422,
+            "The document was read but no medicines or lab values could be "
+            "recognised in it. Nothing was added to the patient record.",
+        )
 
     # Store in RAG for future retrieval
     rag_service.store_document(patient_id, result)
@@ -352,7 +422,9 @@ async def generate_summary(patient_id: str, session_id: str):
     # Get scanned documents
     documents = rag_service.get_patient_documents(patient_id)
 
-    # Get past history (RAG retrieval — this is where face match pays off)
+    # Get past history (RAG retrieval — this is where face match pays off).
+    # exclude_session keeps documents scanned during THIS visit from being
+    # reported back as "past history".
     past_history = rag_service.retrieve_past_history(patient_id)
 
     # Generate structured summary
@@ -362,6 +434,9 @@ async def generate_summary(patient_id: str, session_id: str):
         red_flags=session.red_flags_detected,
         scanned_documents=documents,
         past_history=past_history,
+        raw_answers=session.raw_answers,
+        normalization_source=session.normalization_source,
+        interview_complete=session.is_complete,
     )
 
     return ClinicalSummary(**summary)
@@ -370,22 +445,23 @@ async def generate_summary(patient_id: str, session_id: str):
 @app.post("/summary/confirm")
 async def confirm_summary(patient_id: str, session_id: str, edits: Optional[str] = None):
     """Doctor confirms/edits the summary. Human-in-the-loop gate."""
-    # Get session data to store alongside the visit
     session = aci_engine.get_session(session_id)
     clinical_fields = session.clinical_fields_collected if session else {}
+    raw_answers = session.raw_answers if session else {}
+    red_flags = session.red_flags_detected if session else []
 
-    # Store confirmed visit with clinical data
-    rag_service.store_visit(patient_id, session_id, confirmed=True, edits=edits)
-
-    # Also persist the clinical fields as part of visit record
-    from services.persistence import db
-    db.save_visit(patient_id, {
-        "session_id": session_id,
-        "type": "confirmed_summary",
-        "clinical_fields": clinical_fields,
-        "edits": edits,
-        "confirmed": True,
-    })
+    # ONE visit record. This used to call rag_service.store_visit() AND
+    # db.save_visit(), so every confirmation incremented the visit count by two
+    # and the timeline showed each visit twice.
+    rag_service.store_visit(
+        patient_id,
+        session_id,
+        confirmed=True,
+        edits=edits,
+        clinical_fields=clinical_fields,
+        raw_answers=raw_answers,
+        red_flags=red_flags,
+    )
 
     return {
         "status": "confirmed",
@@ -429,6 +505,21 @@ async def generate_readback(patient_id: str, session_id: str):
 # UTILITY: Standalone TTS (for registration prompts, UI audio)
 # ══════════════════════════════════════════════════════════════════════════════
 
+# Accepts plain language names AND ACI style modes, so the frontend can pass
+# whatever it already has. It used to hardcode "hindi" everywhere, which meant
+# an English-speaking patient still heard Hindi TTS.
+LANG_MAP = {
+    "hindi": "hi-IN",
+    "hinglish": "hi-IN",
+    "english": "en-IN",
+    "hi-IN": "hi-IN",
+    "en-IN": "en-IN",
+    "formal_hindi": "hi-IN",
+    "hinglish_casual": "hi-IN",
+    "english_professional": "en-IN",
+}
+
+
 @app.post("/tts")
 async def text_to_speech_endpoint(text: str, language: str = "hi-IN"):
     """
@@ -436,12 +527,7 @@ async def text_to_speech_endpoint(text: str, language: str = "hi-IN"):
     Used by the frontend for kiosk voice prompts.
     Returns base64-encoded audio.
     """
-    # Map simple language names to Sarvam codes
-    lang_map = {
-        "hindi": "hi-IN", "hinglish": "hi-IN", "english": "en-IN",
-        "hi-IN": "hi-IN", "en-IN": "en-IN",
-    }
-    lang_code = lang_map.get(language, "hi-IN")
+    lang_code = LANG_MAP.get(language, LANG_MAP.get((language or "").lower(), "hi-IN"))
 
     audio_b64 = await voice_service.text_to_speech(text, lang_code)
 
@@ -455,4 +541,9 @@ async def text_to_speech_endpoint(text: str, language: str = "hi-IN"):
 # ── Entry Point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=True)
+    # reload=True restarts the worker on every file touch, which wiped the
+    # in-memory ACI sessions mid-interview and produced "Session not found" at
+    # /summary/generate. Sessions are on disk now, but auto-reload during a demo
+    # is still a liability — opt in explicitly with RELOAD=1.
+    reload = os.getenv("RELOAD", "0").lower() in ("1", "true", "yes")
+    uvicorn.run("main:app", host=settings.HOST, port=settings.PORT, reload=reload)

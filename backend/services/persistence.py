@@ -19,6 +19,7 @@ In production, this would be replaced by:
 import json
 import os
 import logging
+import tempfile
 from typing import Any, Dict, List, Optional
 from pathlib import Path
 
@@ -61,18 +62,73 @@ class PersistenceLayer:
     def _load_json(self, path: Path, default=None):
         if path.exists():
             try:
-                with open(path, "r", encoding="utf-8") as f:
-                    return json.load(f)
-            except (json.JSONDecodeError, IOError):
-                logger.warning("[DB] Corrupted file %s, using default", path)
+                raw = path.read_text(encoding="utf-8").strip()
+                if not raw:
+                    # A 0-byte file is what an interrupted non-atomic write left
+                    # behind. Treat it as "empty", not "corrupt".
+                    logger.warning("[DB] Empty file %s, treating as empty record", path)
+                else:
+                    return json.loads(raw)
+            except json.JSONDecodeError as e:
+                # Never silently discard data — quarantine it so it can be
+                # recovered, then continue with the default.
+                backup = path.with_suffix(path.suffix + ".corrupt")
+                try:
+                    path.replace(backup)
+                    logger.error(
+                        "[DB] Corrupted JSON in %s (%s). Moved to %s", path, e, backup.name
+                    )
+                except OSError:
+                    logger.error("[DB] Corrupted JSON in %s (%s)", path, e)
+            except OSError as e:
+                logger.error("[DB] Could not read %s: %s", path, e)
         return default if default is not None else {}
 
     def _save_json(self, path: Path, data):
+        """
+        Atomic write: serialise to a temp file in the same directory, fsync, then
+        os.replace(). A crash mid-write can no longer leave a truncated or
+        0-byte JSON file behind (which is how patients.json got wiped).
+        """
         path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2, ensure_ascii=False, default=str)
+        payload = json.dumps(data, indent=2, ensure_ascii=False, default=str)
+        tmp_fd, tmp_name = tempfile.mkstemp(
+            dir=str(path.parent), prefix=path.name + ".", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(tmp_fd, "w", encoding="utf-8") as f:
+                f.write(payload)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_name, path)  # atomic on both POSIX and Windows
+        except Exception:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     # ── Patient Registry ──────────────────────────────────────────────────
+
+    @staticmethod
+    def _next_numbered_path(directory: Path, prefix: str) -> Path:
+        """
+        Next free `<prefix>_NNN.json` in `directory`.
+
+        Counting the existing files was wrong: deleting visit_002 made the next
+        save reuse visit_003's slot and clobber it. Take max(index) + 1 and
+        still verify the name is free.
+        """
+        directory.mkdir(parents=True, exist_ok=True)
+        highest = 0
+        for f in directory.glob(f"{prefix}_*.json"):
+            stem = f.stem[len(prefix) + 1:]
+            if stem.isdigit():
+                highest = max(highest, int(stem))
+        n = highest + 1
+        while (directory / f"{prefix}_{n:03d}.json").exists():
+            n += 1
+        return directory / f"{prefix}_{n:03d}.json"
 
     def save_patient(self, patient_id: str, data: Dict[str, Any]):
         """Save patient to registry."""
@@ -124,16 +180,34 @@ class PersistenceLayer:
     # ── Visit History ─────────────────────────────────────────────────────
 
     def save_visit(self, patient_id: str, visit_data: Dict[str, Any]):
-        """Save a completed visit."""
+        """
+        Save a completed visit, keyed by session.
+
+        The doctor's report offers three separate confirm buttons ("Send to
+        Doctor", "Confirm & Save", and the readback's "Haan, sahi hai"), and each
+        POSTs /summary/confirm. Appending unconditionally meant one consultation
+        could be stored as three visits, so the next time that patient walked in
+        the kiosk told the doctor they had three prior encounters. A repeat
+        confirmation of the SAME session now overwrites its own record.
+        """
         visit_dir = DATA_DIR / "visits" / patient_id
-        visit_dir.mkdir(parents=True, exist_ok=True)
-
-        existing = list(visit_dir.glob("visit_*.json"))
-        visit_num = len(existing) + 1
-        filename = f"visit_{visit_num:03d}.json"
-
-        self._save_json(visit_dir / filename, visit_data)
-        logger.info("[DB] Visit %d saved for %s", visit_num, patient_id)
+        session_id = visit_data.get("session_id")
+        path = None
+        if session_id and visit_dir.exists():
+            for f in sorted(visit_dir.glob("visit_*.json")):
+                existing = self._load_json(f)
+                if existing and existing.get("session_id") == session_id:
+                    path = f
+                    break
+        if path is None:
+            path = self._next_numbered_path(visit_dir, "visit")
+            logger.info("[DB] Visit saved for %s -> %s", patient_id, path.name)
+        else:
+            logger.info(
+                "[DB] Visit %s re-confirmed for %s -> %s (no new visit record)",
+                session_id, patient_id, path.name,
+            )
+        self._save_json(path, visit_data)
 
     def get_visits(self, patient_id: str) -> List[Dict[str, Any]]:
         """Get all visits for a patient, sorted by date."""
@@ -160,14 +234,9 @@ class PersistenceLayer:
     def save_document(self, patient_id: str, doc_data: Dict[str, Any]):
         """Save a scanned document (prescription/lab report)."""
         doc_dir = DATA_DIR / "documents" / patient_id
-        doc_dir.mkdir(parents=True, exist_ok=True)
-
-        existing = list(doc_dir.glob("doc_*.json"))
-        doc_num = len(existing) + 1
-        filename = f"doc_{doc_num:03d}.json"
-
-        self._save_json(doc_dir / filename, doc_data)
-        logger.info("[DB] Document %d saved for %s", doc_num, patient_id)
+        path = self._next_numbered_path(doc_dir, "doc")
+        self._save_json(path, doc_data)
+        logger.info("[DB] Document saved for %s -> %s", patient_id, path.name)
 
     def get_documents(self, patient_id: str) -> List[Dict[str, Any]]:
         """Get all scanned documents for a patient."""

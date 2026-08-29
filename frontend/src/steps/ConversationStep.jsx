@@ -1,72 +1,95 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 
-const FALLBACK_QUESTIONS = [
-  { field: 'chief_complaint', system: 'Kya problem ho raha hai aapko? Batao kya hua.', touchOptions: ['Chest pain', 'Headache', 'Stomach pain', 'Fever', 'Back pain', 'Breathing difficulty', 'Other'] },
-  { field: 'onset', system: 'Yeh kab se ho raha hai?', touchOptions: ['Today', 'Since yesterday', '2-3 days', '1 week', 'More than a week'] },
-  { field: 'character', system: 'Yeh kaisa feel hota hai? Describe karein.', touchOptions: ['Sharp/stabbing', 'Dull/aching', 'Burning', 'Pressure/heaviness', 'Throbbing'] },
-  { field: 'radiation', system: 'Kya yeh kisi aur jagah bhi jaata hai?', touchOptions: ['Yes, spreading', 'No, stays in one place', 'Sometimes'] },
-  { field: 'associated_symptoms', system: 'Aur kuch symptoms hain? Fever, vomiting, dizziness?', touchOptions: ['Fever', 'Nausea/vomiting', 'Dizziness', 'Breathlessness', 'Sweating', 'None'] },
-  { field: 'timing', system: 'Constant hai ya aata jaata hai?', touchOptions: ['Constant', 'Comes and goes', 'Only at certain times', 'Getting worse'] },
-  { field: 'exacerbating', system: 'Kya karne pe badhta hai? Aur kya karne pe kam hota hai?', touchOptions: ['Worse with movement', 'Worse with eating', 'Better with rest', 'No change'] },
-  { field: 'severity', system: 'Scale of 1-10 pe kitna hai?', touchOptions: ['1-3 (Mild)', '4-6 (Moderate)', '7-8 (Severe)', '9-10 (Very severe)'] },
-  { field: 'past_medical', system: 'Koi purani bimari? Diabetes, BP, thyroid?', touchOptions: ['Diabetes', 'Hypertension', 'Heart disease', 'Thyroid', 'Asthma', 'None'] },
-  { field: 'medications', system: 'Koi regular medicine chal rahi hai?', touchOptions: ['Yes, for diabetes', 'Yes, for BP', 'Multiple medications', 'No regular meds'] },
-  { field: 'allergies', system: 'Koi allergy hai? Medicine ya food se?', touchOptions: ['No allergies', 'Medicine allergy', 'Food allergy', 'Not sure'] },
-  { field: 'family_history', system: 'Family mein kisi ko heart problem, diabetes, ya kuch serious?', touchOptions: ['Heart disease', 'Diabetes', 'Cancer', 'No significant history'] },
-]
+// There is deliberately NO offline question script here. This step used to carry
+// its own 13-question Hinglish list and run the whole interview locally whenever
+// the backend was unreachable: the answers were never normalized into the strict
+// clinical English layer, no red flags were evaluated, nothing was persisted, and
+// no doctor's report could be produced — but the screen looked identical to a
+// working interview, right down to the progress bar reaching 100%. Without a
+// clinical session this step now says so and offers a retry.
 
 // SOCRATES letters
 const SOCRATES = ['S', 'O', 'C', 'R', 'A', 'T', 'E', 'S']
 const SOCRATES_LABELS = 'Site · Onset · Character · Radiation · Associated · Timing · Exacerbating · Severity'
 
-export default function ConversationStep({ patient, sessionId, patientId, apiBase, onComplete, onBack }) {
+const STYLE_LABEL = {
+  formal_hindi: 'Formal Hindi',
+  hinglish_casual: 'Hinglish (casual)',
+  english_professional: 'English (professional)',
+}
+
+export default function ConversationStep({ patient, sessionId, apiBase, onComplete, onBack, onRetryConnection }) {
   const [messages, setMessages] = useState([])
   const [isTyping, setIsTyping] = useState(false)
   const [langRatio, setLangRatio] = useState({ hindi: 33, english: 33, hinglish: 34 })
-  const [styleMode, setStyleMode] = useState('hinglish')
+  const [styleMode, setStyleMode] = useState(patient?.styleMode || 'hinglish_casual')
   const [redFlags, setRedFlags] = useState([])
   const [redFlagDismissed, setRedFlagDismissed] = useState(false)
   const [isComplete, setIsComplete] = useState(false)
   const [progress, setProgress] = useState(0)
-  const [backendMode, setBackendMode] = useState(!!sessionId)
   const [collectedFields, setCollectedFields] = useState({})
-  const [fallbackIndex, setFallbackIndex] = useState(0)
+  const [rawAnswers, setRawAnswers] = useState({})
   const [isListening, setIsListening] = useState(false)
   const [liveTranscript, setLiveTranscript] = useState('')
   const [typedInput, setTypedInput] = useState('')
+  const [answered, setAnswered] = useState(0)
+  const [retrying, setRetrying] = useState(false)
+  // The kiosk used to hardcode 12 while the engine asked 13, so the counter read
+  // "13 of 12 complete". The engine is the only source of this number now.
+  const [totalQs, setTotalQs] = useState(patient?.totalQuestions || 0)
+  const [connectionError, setConnectionError] = useState('')
   const messagesEndRef = useRef(null)
   const recognitionRef = useRef(null)
   const silenceTimerRef = useRef(null)
+  // Speech callbacks are created once per mic press; without refs they read the
+  // state values captured at that moment (always the initial ones).
+  const liveTranscriptRef = useRef('')
+  const handleInputRef = useRef(null)
+  const styleModeRef = useRef(styleMode)
+  const lastQuestionRef = useRef(null)
+  const greetedRef = useRef(false)
+  const currentAudioRef = useRef(null)
 
-  const scrollToBottom = () => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  useEffect(scrollToBottom, [messages])
+  const scrollToBottom = () => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }) }
+  useEffect(() => { scrollToBottom() }, [messages])
+  useEffect(() => { styleModeRef.current = styleMode }, [styleMode])
 
-  const speakText = useCallback(async (text) => {
+  // Speak in the style the engine actually selected. This was pinned to
+  // `language=hindi`, so an English-speaking patient heard Hindi TTS.
+  const speakText = useCallback(async (text, style) => {
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause()
+      currentAudioRef.current = null
+    }
+
     const ttsBase = apiBase || 'http://localhost:8080'
+    const lang = style || styleModeRef.current || 'hinglish_casual'
     try {
-      const res = await fetch(`${ttsBase}/tts?text=${encodeURIComponent(text)}&language=hindi`, { method: 'POST' })
+      const res = await fetch(
+        `${ttsBase}/tts?text=${encodeURIComponent(text)}&language=${encodeURIComponent(lang)}`,
+        { method: 'POST' }
+      )
       if (res.ok) {
         const data = await res.json()
-        if (data.audio_base64) { const audio = new Audio(`data:audio/wav;base64,${data.audio_base64}`); audio.play(); return }
+        if (data.audio_base64) {
+          const audio = new Audio(`data:audio/wav;base64,${data.audio_base64}`);
+          currentAudioRef.current = audio;
+          audio.play();
+          return
+        }
       }
     } catch {}
     if ('speechSynthesis' in window) {
       window.speechSynthesis.cancel()
       const u = new SpeechSynthesisUtterance(text)
-      u.lang = 'hi-IN'; u.rate = 0.9
+      u.lang = lang === 'english_professional' ? 'en-IN' : 'hi-IN'
+      u.rate = 0.9
       window.speechSynthesis.speak(u)
     }
   }, [apiBase])
 
-  useEffect(() => {
-    const timer = setTimeout(() => {
-      if (backendMode && patient?.greeting) addAIMessage(patient.greeting, patient.touchOptions || [])
-      else { const q = FALLBACK_QUESTIONS[0]; addAIMessage(q.system, q.touchOptions) }
-    }, 800)
-    return () => clearTimeout(timer)
-  }, [])
-
-  const addAIMessage = (text, touchOptions = []) => {
+  const addAIMessage = useCallback((text, touchOptions = [], style) => {
+    lastQuestionRef.current = { text, touchOptions, style }
     setIsTyping(true)
     setTimeout(() => {
       setIsTyping(false)
@@ -74,60 +97,98 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
         role: 'system', text, touchOptions,
         time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       }])
-      speakText(text)
+      speakText(text, style)
     }, 800 + Math.random() * 600)
-  }
+  }, [speakText])
+
+  // Greet only once a real session exists — and only once, so a retry that
+  // succeeds does not replay the greeting on top of an interview in progress.
+  // The flag is set when the message is actually added, NOT when the timer is
+  // scheduled: `patient` gets a new object identity on every setPatientData, and
+  // StrictMode re-runs mount effects, so a flag set up-front let the cleanup
+  // cancel the pending greeting while the re-run bailed out — no greeting at all.
+  useEffect(() => {
+    if (!sessionId || !patient?.greeting || greetedRef.current) return
+    const timer = setTimeout(() => {
+      greetedRef.current = true
+      addAIMessage(patient.greeting, patient.touchOptions || [], patient.styleMode)
+      if (patient.totalQuestions) setTotalQs(patient.totalQuestions)
+    }, 800)
+    return () => clearTimeout(timer)
+  }, [sessionId, patient, addAIMessage])
 
   const sendToBackend = async (text) => {
-    if (!backendMode || !sessionId) return null
-    try {
-      const base = apiBase || 'http://localhost:8080'
-      const res = await fetch(`${base}/aci/converse`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: sessionId, patient_text: text }),
-      })
-      if (res.ok) return await res.json()
-    } catch (err) { console.warn('Backend ACI unavailable:', err.message); setBackendMode(false) }
-    return null
+    const base = apiBase || 'http://localhost:8080'
+    const res = await fetch(`${base}/aci/converse`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ session_id: sessionId, patient_text: text }),
+    })
+    if (!res.ok) throw new Error(`Server returned ${res.status}`)
+    return await res.json()
   }
 
   const handlePatientInput = async (text) => {
+    const trimmed = (text || '').trim()
+    if (!trimmed || !sessionId) return
     setMessages(prev => [...prev, {
-      role: 'patient', text,
+      role: 'patient', text: trimmed,
       time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
     }])
     setTypedInput('')
+    setConnectionError('')
 
-    if (backendMode) {
-      setIsTyping(true)
-      const result = await sendToBackend(text)
+    setIsTyping(true)
+    let result = null
+    try {
+      result = await sendToBackend(trimmed)
+    } catch (err) {
       setIsTyping(false)
-      if (result) {
-        addAIMessage(result.ai_response, result.touch_options || [])
-        if (result.language_ratios) setLangRatio(result.language_ratios)
-        if (result.style_mode) setStyleMode(result.style_mode)
-        if (result.progress_pct != null) setProgress(result.progress_pct)
-        if (result.red_flags?.length > 0) setRedFlags(prev => [...prev, ...result.red_flags.filter(f => !prev.includes(f))])
-        if (result.field_collected) setCollectedFields(prev => ({ ...prev, [result.field_collected]: text }))
-        if (result.is_complete) setTimeout(() => setIsComplete(true), 2000)
-        return
-      }
+      // Falling through to an offline script here restarted the interview at
+      // question 1 and silently discarded everything already collected.
+      // Surface the failure and let the patient re-send instead.
+      setConnectionError(`Connection problem: ${err.message}. Tap send again to retry.`)
+      return
     }
+    setIsTyping(false)
 
-    const currentQ = FALLBACK_QUESTIONS[fallbackIndex]
-    if (currentQ) setCollectedFields(prev => ({ ...prev, [currentQ.field]: text }))
-    const nextIdx = fallbackIndex + 1
-    setFallbackIndex(nextIdx)
-    setProgress(Math.round((nextIdx / FALLBACK_QUESTIONS.length) * 100))
-    if (nextIdx >= FALLBACK_QUESTIONS.length) {
-      addAIMessage('Thank you! Sab information mil gayi. Summary generate ho raha hai.', [])
-      setTimeout(() => setIsComplete(true), 2000)
-    } else {
-      const nextQ = FALLBACK_QUESTIONS[nextIdx]
-      addAIMessage(nextQ.system, nextQ.touchOptions)
+    if (result.language_ratios) setLangRatio(result.language_ratios)
+    if (result.style_mode) setStyleMode(result.style_mode)
+    if (result.progress_pct != null) setProgress(result.progress_pct)
+    if (result.total_questions) setTotalQs(result.total_questions)
+    if (result.questions_answered != null) setAnswered(result.questions_answered)
+    if (result.red_flags?.length > 0) {
+      setRedFlags(prev => [...prev, ...result.red_flags.filter(f => !prev.includes(f))])
     }
+    // `field_collected` is the field of the NEXT question. Storing the answer
+    // under it shifted every answer one field forward — the chief complaint
+    // landed in `onset`, and the last answer was dropped entirely.
+    const storedField = result.field_stored || result.field_collected
+    if (storedField) {
+      setRawAnswers(prev => ({ ...prev, [storedField]: trimmed }))
+      setCollectedFields(prev => ({
+        ...prev,
+        [storedField]: result.normalized_value || trimmed,
+      }))
+    }
+    // Show what went into the record — the strict English clinical layer.
+    if (result.normalized_value && result.normalized_value !== trimmed) {
+      setMessages(prev => {
+        const next = [...prev]
+        for (let i = next.length - 1; i >= 0; i--) {
+          if (next[i].role === 'patient') { next[i] = { ...next[i], recordedAs: result.normalized_value }; break }
+        }
+        return next
+      })
+    }
+    addAIMessage(result.ai_response, result.touch_options || [], result.style_mode)
+    if (result.is_complete) setTimeout(() => setIsComplete(true), 2000)
   }
+
+  // Keep the ref pointing at the latest handler so speech callbacks never fire a
+  // version of it that closed over a stale sessionId.
+  useEffect(() => { handleInputRef.current = handlePatientInput; })
+  useEffect(() => { liveTranscriptRef.current = liveTranscript; }, [liveTranscript])
 
   const handleMicClick = () => {
     if (isListening && recognitionRef.current) {
@@ -136,10 +197,16 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
       return
     }
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
-    if (!SpeechRecognition) return
+    if (!SpeechRecognition) {
+      setConnectionError('Voice input is not supported in this browser. Please type your answer.')
+      return
+    }
     const recognition = new SpeechRecognition()
-    recognition.lang = 'hi-IN'; recognition.interimResults = true; recognition.continuous = true
-    recognitionRef.current = recognition; setIsListening(true); setLiveTranscript('')
+    // Follow the patient's own style rather than always assuming Hindi.
+    recognition.lang = styleModeRef.current === 'english_professional' ? 'en-IN' : 'hi-IN'
+    recognition.interimResults = true; recognition.continuous = true
+    recognitionRef.current = recognition; setIsListening(true)
+    setLiveTranscript(''); liveTranscriptRef.current = ''
     let finalTranscript = ''
     recognition.onresult = (event) => {
       let interim = ''
@@ -147,27 +214,95 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
         const t = event.results[i][0].transcript
         if (event.results[i].isFinal) finalTranscript += t + ' '; else interim += t
       }
-      setLiveTranscript((finalTranscript + interim).trim())
+      const combined = (finalTranscript + interim).trim()
+      setLiveTranscript(combined)
+      liveTranscriptRef.current = combined
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current)
       silenceTimerRef.current = setTimeout(() => recognition.stop(), 2500)
     }
-    recognition.onerror = () => { setIsListening(false); setLiveTranscript('') }
+    recognition.onerror = () => { setIsListening(false); setLiveTranscript(''); liveTranscriptRef.current = '' }
     recognition.onend = () => {
       setIsListening(false)
-      const text = (finalTranscript || liveTranscript).trim()
-      setLiveTranscript('')
-      if (text) handlePatientInput(text)
+      // liveTranscriptRef, not the captured state: interim-only speech (common
+      // for short answers like "haan") produced an empty finalTranscript and the
+      // whole answer was silently dropped.
+      const text = (finalTranscript || liveTranscriptRef.current || '').trim()
+      setLiveTranscript(''); liveTranscriptRef.current = ''
+      if (text) handleInputRef.current?.(text)
     }
     recognition.start()
   }
 
   const handleComplete = () => {
-    onComplete({ messages, redFlags, styleMode, sessionId, collectedFields, clinicalFields: collectedFields })
+    onComplete({
+      messages, redFlags, styleMode, sessionId, collectedFields, rawAnswers,
+      clinicalFields: collectedFields,
+      questionsAnswered: answered, totalQuestions: totalQs,
+      interviewComplete: totalQs > 0 && answered >= totalQs,
+    })
   }
 
-  const patientName = patient?.name || 'Patient'
-  const totalQs = backendMode ? 12 : FALLBACK_QUESTIONS.length
-  const currentQ = Math.round((progress / 100) * totalQs)
+  const handleRetry = async () => {
+    if (retrying || !onRetryConnection) return
+    setRetrying(true)
+    setConnectionError('')
+    try {
+      await onRetryConnection()
+    } catch (err) {
+      setConnectionError(`Still unreachable: ${err.message}`)
+    } finally {
+      setRetrying(false)
+    }
+  }
+
+  // No session means the ACI engine never started: there is nothing to ask, no
+  // way to normalize an answer into the clinical record, and no report to build.
+  // Running a local script here would look like a working interview and produce
+  // nothing the doctor can use, so the step stops here instead.
+  if (!sessionId) {
+    return (
+      <>
+        <div className="screen-heading compact-heading">
+          <span className="eyebrow">CLINICAL CONVERSATION</span>
+          <h1>The interview can't<br /><i>start right now.</i></h1>
+        </div>
+
+        <div className="upload-panel" style={{ cursor: 'default', textAlign: 'center' }}>
+          <div style={{ fontSize: 44, marginBottom: 8 }}>⚠</div>
+          <h3>Clinical service<br />unreachable</h3>
+          <p style={{ maxWidth: 460, margin: '0 auto' }}>
+            Your answers are turned into the doctor's record by the clinical
+            service, which this kiosk can't reach. Nothing you say now could be
+            saved or passed on, so the interview is paused rather than run
+            without it.
+          </p>
+          {connectionError && (
+            <div role="alert" style={{
+              background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+              borderRadius: 'var(--radius-md)', padding: '10px 12px', fontSize: 12,
+              color: '#fca5a5', marginTop: 14, maxWidth: 460,
+            }}>
+              {connectionError}
+            </div>
+          )}
+          <small style={{ marginTop: 14 }}>
+            Please tell the front desk if this keeps happening.
+          </small>
+        </div>
+
+        <div className="action-bar">
+          <button className="btn btn-secondary" onClick={onBack}>← Back</button>
+          {onRetryConnection && (
+            <button className="btn btn-primary btn-lg" onClick={handleRetry} disabled={retrying}>
+              {retrying ? 'Reconnecting…' : 'Try again'}
+            </button>
+          )}
+        </div>
+      </>
+    )
+  }
+
+  const currentQ = answered || Math.round((progress / 100) * totalQs)
   // How many SOCRATES letters done based on progress
   const socratesDone = Math.floor((progress / 100) * 8)
 
@@ -210,6 +345,15 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
                 {msg.role === 'system' && <span className="avatar ai-avatar">A</span>}
                 <div>
                   <div className="message-bubble-inner">{msg.text}</div>
+                  {/* The strict clinical layer: what actually entered the record */}
+                  {msg.recordedAs && (
+                    <div style={{
+                      fontSize: 11, color: 'var(--accent-teal)', marginTop: 4,
+                      fontFamily: 'monospace', opacity: 0.85,
+                    }}>
+                      → recorded as: {msg.recordedAs}
+                    </div>
+                  )}
                   <time className="message-time">{msg.time}</time>
                   {/* Touch options only for last system message */}
                   {msg.role === 'system' && i === messages.length - 1 && showTouchOptions && (
@@ -241,6 +385,16 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
                 color: '#fca5a5', fontStyle: 'italic',
               }}>
                 "{liveTranscript}"
+              </div>
+            )}
+
+            {connectionError && (
+              <div style={{
+                background: 'rgba(239,68,68,0.1)', border: '1px solid rgba(239,68,68,0.3)',
+                borderRadius: 'var(--radius-md)', padding: '10px 14px', fontSize: 13,
+                color: '#fca5a5',
+              }}>
+                {connectionError}
               </div>
             )}
 
@@ -305,11 +459,11 @@ export default function ConversationStep({ patient, sessionId, patientId, apiBas
 
           {/* AI note */}
           <div className="clinical-notes">
-            <span>AI NOTE</span>
+            <span>AI NOTE · {STYLE_LABEL[styleMode] || styleMode}</span>
             <p>
-              {styleMode === 'formal_hindi' ? 'Responding in Formal Hindi mode.' :
-               styleMode === 'english_professional' ? 'Responding in English Professional mode.' :
-               'Symptom pattern is being structured for the clinician.'}
+              {styleMode === 'formal_hindi' ? 'Responding in Formal Hindi. Record is kept in clinical English.' :
+               styleMode === 'english_professional' ? 'Responding in professional English.' :
+               'Matching your Hinglish. Record is kept in clinical English.'}
             </p>
           </div>
         </aside>
