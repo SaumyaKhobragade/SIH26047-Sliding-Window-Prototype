@@ -202,8 +202,11 @@ export default function ConversationStep({ patient, sessionId, apiBase, onComple
       return
     }
     const recognition = new SpeechRecognition()
-    // Follow the patient's own style rather than always assuming Hindi.
-    recognition.lang = styleModeRef.current === 'english_professional' ? 'en-IN' : 'hi-IN'
+    // Using 'hi-IN' causes the browser to transcribe English words in Devanagari
+    // script (e.g. "चेस्ट पेन"). The backend classifies all Devanagari as Hindi,
+    // which traps the patient in Hindi mode forever. 'en-IN' handles code-mixing
+    // perfectly and returns Latin script that the backend can classify accurately.
+    recognition.lang = 'en-IN'
     recognition.interimResults = true; recognition.continuous = true
     recognitionRef.current = recognition; setIsListening(true)
     setLiveTranscript(''); liveTranscriptRef.current = ''
