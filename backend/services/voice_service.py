@@ -129,10 +129,7 @@ class VoiceService:
 
             response = await asyncio.to_thread(_synthesize)
 
-            # Log response attributes for debugging
-            logger.info("[VOICE] TTS response type: %s, attrs: %s", type(response).__name__, dir(response))
-
-            # V3 may return base64 in 'audios' list
+            # V3 returns base64 in 'audios' list
             if hasattr(response, 'audios') and response.audios:
                 audio_data = response.audios[0]
                 if isinstance(audio_data, str):
