@@ -112,7 +112,7 @@ const promptFor = (step, lang) => {
   return step.prompt
 }
 
-const API = 'http://localhost:8080'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 
 export default function RegistrationStep({ onComplete, onFlowStateChange }) {
   const [flowState, setFlowState] = useState('scanning') // scanning | returning | new_reg | consent

@@ -62,7 +62,7 @@ export default function ConversationStep({ patient, sessionId, apiBase, onComple
       currentAudioRef.current = null
     }
 
-    const ttsBase = apiBase || 'http://localhost:8080'
+    const ttsBase = apiBase || import.meta.env.VITE_API_URL || 'http://localhost:8080'
     const lang = style || styleModeRef.current || 'hinglish_casual'
     try {
       const res = await fetch(
@@ -118,7 +118,7 @@ export default function ConversationStep({ patient, sessionId, apiBase, onComple
   }, [sessionId, patient, addAIMessage])
 
   const sendToBackend = async (text) => {
-    const base = apiBase || 'http://localhost:8080'
+    const base = apiBase || import.meta.env.VITE_API_URL || 'http://localhost:8080'
     const res = await fetch(`${base}/aci/converse`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

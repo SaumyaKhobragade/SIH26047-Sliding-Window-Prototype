@@ -4,7 +4,7 @@ import ConversationStep from './steps/ConversationStep'
 import PrescriptionStep from './steps/PrescriptionStep'
 import DoctorReportStep from './steps/DoctorReportStep'
 
-const API = 'http://localhost:8080'
+const API = import.meta.env.VITE_API_URL || 'http://localhost:8080'
 
 // Map React step index + RegistrationStep flowState → sidebar step 1-6
 function getSidebarActive(currentStep, regFlowState) {
