@@ -32,3 +32,5 @@ backend/__pycache__/
 backend/services/__pycache__/
 *.pyc
 .opencode/
+
+.claude/
